@@ -48,6 +48,8 @@ export interface StageDependencies {
     /** Why there is no provider, when there is none. */
     unavailableReason: string | null;
     maxAnalysesPerScan: number;
+    /** Model calls allowed per UTC day across all scans (cached results do not count). */
+    maxAnalysesPerDay: number;
   };
   logger: Logger;
   now?: () => string;
@@ -449,6 +451,24 @@ export function createStages(deps: StageDependencies): StageHandlers {
       const inputHash = await analysisInputHash(provider, input);
       let analysis = group.force ? null : await store.findCachedAnalysis(inputHash);
       if (!analysis) {
+        // Lifetime cap per scan (re-analysis included), then the global daily cap.
+        const perScan = await store.consumeQuota(`ai-analyses:scan:${scan.id}`, deps.ai.maxAnalysesPerScan, 365 * 86_400);
+        if (!perScan.allowed) {
+          writes.push(
+            store.markRemainingSkipped(scan.id, `The per-scan AI limit of ${deps.ai.maxAnalysesPerScan} analyses was reached.`),
+          );
+          break;
+        }
+        const quota = await store.consumeQuota('ai-analyses', deps.ai.maxAnalysesPerDay, 86_400);
+        if (!quota.allowed) {
+          writes.push(
+            store.markRemainingSkipped(
+              scan.id,
+              `The daily AI limit of ${deps.ai.maxAnalysesPerDay} analyses was reached. It resets at 00:00 UTC.`,
+            ),
+          );
+          break;
+        }
         try {
           const outcome = await analyzeUpgrade(provider, input);
           if (outcome.status === 'failed') {

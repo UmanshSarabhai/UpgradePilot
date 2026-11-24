@@ -28,8 +28,10 @@ export function createWorkersAiProvider(ai: Ai, model: string): AiProvider {
         });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        if (UNAVAILABLE_PATTERN.test(message)) throw new AiUnavailableError(`Workers AI is unavailable: ${message}`);
-        throw new Error(`Workers AI request failed: ${message}`);
+        if (UNAVAILABLE_PATTERN.test(message)) {
+          throw new AiUnavailableError('Workers AI is unavailable (quota, credentials, or local dev without Workers AI).');
+        }
+        throw new Error('The AI provider returned an error.');
       }
 
       const response = (result as { response?: unknown } | null | undefined)?.response;

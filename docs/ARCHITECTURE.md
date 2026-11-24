@@ -160,6 +160,22 @@ AI runs only for upgrades that are major, medium or high risk, or have breaking-
 
 Upgrades are merged across manifests by package and versions, then grouped: **safe** (low risk, recommend upgrade), **high-risk migrations** (high risk), **review before upgrading** (everything else). The ordered plan puts upgrades that fix security advisories first, then safe, review and high-risk. Every finding carries its origin: deterministic, AI, or unverified AI claim. The Markdown export escapes untrusted text and only links `http(s)` URLs.
 
+## Frontend (Phase 4)
+
+- **Stack**: Next.js 16 App Router, React 19, Tailwind 4, shadcn/ui (Radix), TanStack Query 5. Every API response is validated in the browser with the same Zod schemas the API uses (`packages/shared`).
+- **Hosting**: `next build` produces a static export (`apps/web/out`). The API Worker serves it as static assets, and `run_worker_first: ["/api/*"]` sends API calls to the Worker. One origin, no CORS, and static requests are free on Workers.
+- **Routes**: `/` (dashboard and new-scan form), `/scan/?id=` (progress, dependency table, detail panel, report tab), `/repositories/` and `/repository/?id=` (history). IDs travel as query parameters, because a static export cannot pre-render unknown IDs.
+- **Live progress**: TanStack Query polls a scan every 2 seconds while it is running, and the dependency table refreshes alongside it.
+- **Local dev**: `next dev` uses a separate config that proxies `/api` to `wrangler dev` on port 8787, because rewrites are not allowed with `output: "export"`.
+- **Untrusted text**: release notes, changelog excerpts and AI text render as plain React text. Links are only rendered for `http(s)` URLs.
+
+| Endpoint added for the UI | Purpose |
+| --- | --- |
+| `GET /api/dashboard` | Totals over the latest completed scan per repository, plus the 10 most recent scans |
+| `GET /api/repositories` | Paginated repositories with their newest scan |
+| `GET /api/repositories/:repositoryId/scans` | Paginated scan history with headline counts |
+| `GET /api/scans/:scanId/dependencies/:dependencyId` | One dependency with risk details, advisories, AI analysis and evidence excerpts |
+
 ## Known risks
 
 - **CPU on large repos.** The recursive tree listing for a big monorepo is several MB of JSON. TanStack/query took 25 subrequests and parsed fine in Node, but we have not measured it against the 10 ms Free limit in production. If it fails there, the fallback is to list only the workspace folders through the Contents API instead of the whole tree.
@@ -189,6 +205,8 @@ All responses are JSON validated against schemas in `packages/shared`. Errors sh
 | `POST /api/scans/:scanId/reanalyze` | `{ dependencyIds (1-20), force? }`. Re-runs risk and AI for those upgrades of a completed scan. `force` skips the cache. 202, or 409 while running | 3 |
 | `GET /api/repositories` | Analysed repositories, paginated | 4 |
 | `GET /api/repositories/:repositoryId/scans` | Scan history, paginated | 4 |
+| `GET /api/dashboard` | Dashboard totals and recent scans | 4 |
+| `GET /api/scans/:scanId/dependencies/:dependencyId` | Dependency detail | 4 |
 
 ## Data model
 
@@ -235,6 +253,16 @@ GitHub responses are not cached. One scan reads each file once, and evidence is 
 - Repository code is never run, installed or evaluated. Files are read as text only.
 - Repository files, changelogs and release notes are untrusted. In AI prompts they sit inside delimited blocks, and the system prompt tells the model to treat them as data. Output must pass a Zod schema, and versions in the output are checked against the registry data. Claims without a source are marked unverified.
 - `GITHUB_TOKEN`, `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` live in Cloudflare secrets (`.dev.vars` locally). The browser never sees a key.
+- AI output never becomes markup: the dashboard renders it as React text, the Markdown export escapes it, and only `http(s)` URLs become links.
+- **Abuse limits** (Phase 5): the app has no accounts, so expensive work is capped with fixed-window counters in D1 (`rate_counters`), which only write while under the limit:
+  - repository checks, new scans and re-analysis per hour, globally and per client (a quarter of the global cap, keyed by a truncated SHA-256 of the client IP, never the raw address);
+  - AI model calls per UTC day, and per scan for its whole life (re-analysis included);
+  - at most 300 distinct npm packages and 20 release-note items per upgrade per scan;
+  - a scan fails after 4 attempts (including runs killed by the CPU limit, which never report an error) or 6 hours, so nothing retries forever.
+  Over a limit the API returns `429 RATE_LIMITED` with `Retry-After`. Cloudflare's rate-limiting binding was not used: it is not confirmed for the Free plan, counts per location, and its docs advise against IP keys.
+- **Untrusted patterns and text** (Phase 5): workspace globs from repositories are matched segment by segment without regular expressions, and changelog lines longer than 200 characters are skipped, so crafted input cannot cause catastrophic backtracking. npm and repository strings in AI prompts are stripped of control characters and tag-neutralised.
+- **Requests**: JSON bodies must be sent as `application/json` (415 otherwise), which blocks cross-site form posts without a CORS preflight. `page` is capped at 1000.
+- **Headers** (Phase 5): static pages get a Content Security Policy (`default-src 'self'`, no framing), `nosniff` and a referrer policy from `apps/web/public/_headers`. API responses get Hono's `secureHeaders()`. The CSP allows inline scripts because the Next.js static export inlines its bootstrap data.
 
 ## Implementation plan
 
@@ -244,4 +272,4 @@ GitHub responses are not cached. One scan reads each file once, and evidence is 
 | 2 | npm resolution, semver classification, release-note collection, queue-driven orchestration, scan endpoints, caching | A real repo scans end to end locally without AI |
 | 3 | Deterministic risk rules, AI providers, prompt and validation, report and exports | Report generated with and without AI |
 | 4 | Next.js dashboard, scan page, dependency table and details, history, export buttons | UI drives a full scan locally |
-| 5 | Failure-path tests, security review, README, deploy guide, example report | Deployed on the Free plan |
+| 5 | Failure-path tests, security review, abuse limits, README, deploy guide, example report | Deploy dry run passes; the real deploy needs the owner's Cloudflare login |

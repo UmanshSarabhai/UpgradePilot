@@ -9,6 +9,11 @@ import { dirname, selectManifests } from './select-manifests';
 import { type ClassifiedSpec, classifySpec } from './spec';
 
 export const MANIFEST_MAX_BYTES = 1024 * 1024;
+/**
+ * Most distinct npm packages one scan resolves. Each costs several npm calls and, when outdated, a GitHub call,
+ * so this bounds what one request can spend on a public deployment.
+ */
+export const MAX_REGISTRY_PACKAGES = 300;
 export const LOCKFILE_MAX_BYTES = 10 * 1024 * 1024;
 const READ_CONCURRENCY = 4;
 
@@ -123,13 +128,29 @@ export async function discoverDependencies(files: RepositoryFiles): Promise<Disc
     }
   });
 
+  // Keep every row for the first MAX_REGISTRY_PACKAGES distinct packages, in manifest order; drop the rest.
+  const kept = new Set<string>();
+  let dropped = 0;
+  const bounded = dependencies.filter((dep) => {
+    if (!dep.registryName || kept.has(dep.registryName)) return true;
+    if (kept.size < MAX_REGISTRY_PACKAGES) {
+      kept.add(dep.registryName);
+      return true;
+    }
+    dropped++;
+    return false;
+  });
+  if (dropped > 0) {
+    warnings.push(`Only the first ${MAX_REGISTRY_PACKAGES} distinct packages were analysed; ${dropped} more were skipped.`);
+  }
+
   const manifestDirs = new Set(selected.map(dirname));
   const configFiles = [...paths]
     .filter((path) => manifestDirs.has(dirname(path)) && CONFIG_FILE.test(path.split('/').pop() ?? ''))
     .sort()
     .slice(0, MAX_CONFIG_FILES);
 
-  return { dependencies, manifests, skippedManifests: skipped, treeTruncated: listing.truncated, warnings, configFiles };
+  return { dependencies: bounded, manifests, skippedManifests: skipped, treeTruncated: listing.truncated, warnings, configFiles };
 }
 
 async function readLockfile(files: RepositoryFiles, path: string, warnings: string[]): Promise<LockState> {

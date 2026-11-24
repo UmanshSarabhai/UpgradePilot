@@ -166,6 +166,16 @@ describe('parseYarnLock', () => {
 });
 
 describe('selectManifests', () => {
+  it('matches ** across folders and stays fast on a hostile glob', () => {
+    expect(selectManifests(['package.json', 'packages/a/b/package.json'], ['packages/**']).selected).toContain(
+      'packages/a/b/package.json',
+    );
+    const hostile = `${'a'.repeat(200)}/package.json`;
+    const started = performance.now();
+    selectManifests(['package.json', hostile], ['**a**a**a**a**a**a**a**a**b']);
+    expect(performance.now() - started).toBeLessThan(100);
+  });
+
   it('uses workspace globs with negation and ignores node_modules', () => {
     const result = selectManifests(
       [

@@ -4,3 +4,4 @@ export * from './dependency';
 export * from './scan';
 export * from './analysis';
 export * from './report';
+export * from './dashboard';

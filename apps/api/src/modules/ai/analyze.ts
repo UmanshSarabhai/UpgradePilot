@@ -1,7 +1,7 @@
 import type { AffectedFile, Finding, UpgradeAnalysis } from '@upgradepilot/shared';
 import { UpstreamError } from '../../lib/errors';
 import { sha256Hex } from '../../lib/hash';
-import { AiOutputSchema, PROMPT_VERSION, buildRequest, type AiOutput } from './prompt';
+import { AiOutputSchema, AiPublicError, PROMPT_VERSION, buildRequest, type AiOutput } from './prompt';
 import { AiUnavailableError, type AiProvider, type AnalysisInput, type AnalysisOutcome } from './types';
 
 const MAX_ITEMS = 15;
@@ -100,7 +100,9 @@ export async function analyzeUpgrade(provider: AiProvider, input: AnalysisInput)
   } catch (error) {
     if (error instanceof AiUnavailableError) throw error;
     if (error instanceof UpstreamError && error.kind === 'rate_limited') throw error;
-    return { status: 'failed', reason: error instanceof Error ? error.message : String(error), inputHash };
+    // Provider error text can hold credentials hints or internals, and the reason is shown publicly.
+    const reason = error instanceof AiPublicError ? error.message : 'The AI provider returned an error.';
+    return { status: 'failed', reason, inputHash };
   }
 
   const parsed = AiOutputSchema.safeParse(raw);

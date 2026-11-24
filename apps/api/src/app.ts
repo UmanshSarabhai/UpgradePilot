@@ -1,10 +1,12 @@
 import type { ErrorResponse } from '@upgradepilot/shared';
 import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
+import { secureHeaders } from 'hono/secure-headers';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import type { AppEnv } from './env';
 import { AppError, UpstreamError } from './lib/errors';
 import { createLogger } from './lib/logger';
+import { dashboardRoutes } from './routes/dashboard';
 import { healthRoutes } from './routes/health';
 import { repositoryRoutes } from './routes/repositories';
 import { scanRoutes } from './routes/scans';
@@ -34,6 +36,9 @@ export function createApp(options: AppOptions = {}) {
     logger.info('request', { method: c.req.method, path: c.req.path, status: c.res.status, durationMs: Date.now() - started });
   });
 
+  // Static pages get their headers from apps/web/public/_headers; Worker responses need them set here.
+  app.use('/api/*', secureHeaders());
+
   app.use(
     '/api/*',
     bodyLimit({
@@ -45,12 +50,15 @@ export function createApp(options: AppOptions = {}) {
   app.route('/api', healthRoutes);
   app.route('/api', repositoryRoutes);
   app.route('/api', scanRoutes);
+  app.route('/api', dashboardRoutes);
 
   app.notFound((c) => c.json(errorBody('NOT_FOUND', 'Route not found.', c.get('requestId')), 404));
 
   app.onError((error, c) => {
     const requestId = c.get('requestId');
     if (error instanceof AppError) {
+      const retryAfter = (error.details as { retryAfterSeconds?: unknown } | undefined)?.retryAfterSeconds;
+      if (error.code === 'RATE_LIMITED' && typeof retryAfter === 'number') c.header('Retry-After', String(retryAfter));
       return c.json(errorBody(error.code, error.message, requestId, error.details), error.status);
     }
     if (error instanceof UpstreamError) {

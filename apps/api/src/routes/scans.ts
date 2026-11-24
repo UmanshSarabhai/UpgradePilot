@@ -2,6 +2,7 @@ import {
   CreateScanRequestSchema,
   CreateScanResponseSchema,
   DependencyListQuerySchema,
+  DependencyDetailSchema,
   DependencyListResponseSchema,
   type DiscoverySummary,
   DiscoverySummarySchema,
@@ -13,7 +14,8 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 import type { AppEnv, ScanMessage } from '../env';
 import { AppError } from '../lib/errors';
-import { jsonResponse, parseJsonBody } from '../lib/validation';
+import { enforceHourlyLimit } from '../lib/limits';
+import { jsonResponse, parseJsonBody, parseQuery } from '../lib/validation';
 import { renderMarkdown } from '../modules/report/markdown';
 import { parseGitHubRepoUrl } from '../modules/repository/github-url';
 import type { ScanRecord } from '../modules/storage/scan-store';
@@ -62,9 +64,11 @@ export const scanRoutes = new Hono<AppEnv>()
     }
 
     const logger = c.get('logger');
+    const ref = parseGitHubRepoUrl(url); // Malformed URLs fail before they count against the hourly limit.
     const { repositories, store } = buildServices(c.env, logger, c.get('fetchImpl'));
+    await enforceHourlyLimit(c, store, 'scans');
     // Fails fast with 404 for a missing repository or branch, before anything is stored.
-    const { repository } = await repositories.resolveBranch(parseGitHubRepoUrl(url), branch);
+    const { repository } = await repositories.resolveBranch(ref, branch);
     const repositoryId = await store.upsertRepository({
       owner: repository.owner.login,
       name: repository.name,
@@ -93,15 +97,7 @@ export const scanRoutes = new Hono<AppEnv>()
   })
 
   .get('/scans/:scanId/dependencies', async (c) => {
-    const query = DependencyListQuerySchema.safeParse(c.req.query());
-    if (!query.success) {
-      throw new AppError(
-        'VALIDATION_ERROR',
-        'Query parameters are invalid.',
-        400,
-        query.error.issues.map((issue) => ({ path: issue.path.join('.'), message: issue.message })),
-      );
-    }
+    const query = { data: parseQuery(c, DependencyListQuerySchema) };
     const { store } = buildServices(c.env, c.get('logger'), c.get('fetchImpl'));
     const scanId = c.req.param('scanId');
     if (!(await store.getScan(scanId))) throw notFound();
@@ -113,6 +109,13 @@ export const scanRoutes = new Hono<AppEnv>()
       pageSize: query.data.pageSize,
     });
   })
+  .get('/scans/:scanId/dependencies/:dependencyId', async (c) => {
+    const { store } = buildServices(c.env, c.get('logger'), c.get('fetchImpl'));
+    const detail = await store.dependencyDetail(c.req.param('scanId'), c.req.param('dependencyId'));
+    if (!detail) throw new AppError('NOT_FOUND', 'Dependency not found in this scan.', 404);
+    return jsonResponse(c, DependencyDetailSchema, detail);
+  })
+
   .get('/scans/:scanId/report', async (c) => {
     const format = c.req.query('format') ?? 'json';
     if (format !== 'json' && format !== 'markdown') {
@@ -151,6 +154,7 @@ export const scanRoutes = new Hono<AppEnv>()
     if (scan.status !== 'COMPLETED') {
       throw new AppError('CONFLICT', 'Only completed scans can be re-analysed.', 409, { status: scan.status });
     }
+    await enforceHourlyLimit(c, store, 'reanalyze');
     const step = await store.requestReanalysis(scanId, [...new Set(dependencyIds)], force);
     if (step === null) {
       throw new AppError('VALIDATION_ERROR', 'None of the dependencyIds is an upgrade in this scan.', 400);

@@ -221,7 +221,7 @@ describe('renderMarkdown', () => {
   it('renders headings, escapes untrusted text, marks AI claims and skips unsafe links', () => {
     const input = fixture();
     input.analyses.b1 = analysis({
-      summary: 'Uses a | pipe',
+      summary: 'Uses a | pipe **bold** # ![x](y) ~ &amp; _a_',
       breakingChanges: [{ text: 'Bad link', sourceUrl: 'javascript:alert(1)', origin: 'ai' }],
     });
     const md = renderMarkdown(buildReport(input));
@@ -238,6 +238,7 @@ describe('renderMarkdown', () => {
       expect(md).toContain(h);
     }
     expect(md).toContain('Uses a \\| pipe');
+    expect(md).toContain('\\*\\*bold\\*\\* \\# \\!\\[x\\]\\(y\\) \\~ \\&amp; \\_a\\_');
     expect(md).toContain('_(unverified AI claim)_');
     expect(md).not.toContain('javascript:');
     expect(md.endsWith('\n')).toBe(true);

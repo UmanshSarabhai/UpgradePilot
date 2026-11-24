@@ -1,5 +1,6 @@
 import type { Bindings } from './env';
 import { createHttpClient } from './lib/http';
+import { intVar } from './lib/limits';
 import type { Logger } from './lib/logger';
 import { createAiProvider, describeAiConfig } from './modules/ai/provider';
 import type { AiConfig } from './modules/ai/types';
@@ -33,7 +34,6 @@ export function buildServices(env: Bindings, logger: Logger, fetchImpl?: typeof 
     ai: env.AI,
     fetch: fetchImpl,
   };
-  const maxAnalyses = Number.parseInt(env.AI_MAX_ANALYSES_PER_SCAN, 10);
   const stages = createStages({
     store,
     repositories,
@@ -43,7 +43,8 @@ export function buildServices(env: Bindings, logger: Logger, fetchImpl?: typeof 
     ai: {
       provider: createAiProvider(aiConfig),
       unavailableReason: describeAiConfig(aiConfig),
-      maxAnalysesPerScan: Number.isFinite(maxAnalyses) && maxAnalyses >= 0 ? maxAnalyses : 10,
+      maxAnalysesPerScan: intVar(env.AI_MAX_ANALYSES_PER_SCAN, 10),
+      maxAnalysesPerDay: intVar(env.AI_MAX_ANALYSES_PER_DAY, 25),
     },
     logger,
   });

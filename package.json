@@ -8,6 +8,9 @@
   ],
   "scripts": {
     "dev": "npm run dev -w @upgradepilot/api",
+    "dev:web": "npm run dev -w @upgradepilot/web",
+    "build": "npm run build -w @upgradepilot/web",
+    "deploy": "npm run deploy -w @upgradepilot/api",
     "test": "npm run test --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present"
   },

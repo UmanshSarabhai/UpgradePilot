@@ -103,8 +103,8 @@ export function createGitHubClient({ http, token }: { http: HttpClient; token?: 
       const tree = await http.getJson(
         `${repoPath(owner, name)}/git/trees/${encodeURIComponent(commitSha)}?recursive=1`,
         GitHubTreeSchema,
-        // Big monorepos return several MB of tree JSON.
-        { headers: apiHeaders, maxBytes: 20 * 1024 * 1024 },
+        // Big monorepos return several MB of tree JSON. Capped well below the 128 MB isolate memory.
+        { headers: apiHeaders, maxBytes: 10 * 1024 * 1024 },
       );
       return {
         files: tree.tree.filter((entry) => entry.type === 'blob').map((entry) => ({ path: entry.path, size: entry.size })),

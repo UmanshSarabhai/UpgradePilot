@@ -2,7 +2,11 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   CreateScanResponseSchema,
+  DashboardResponseSchema,
+  DependencyDetailSchema,
   DependencyListResponseSchema,
+  RepositoryListResponseSchema,
+  ScanHistoryResponseSchema,
   ErrorResponseSchema,
   ReportSchema,
   ScanSchema,
@@ -117,21 +121,21 @@ let env: Env;
 const app = createApp({ fetch: fakeFetch });
 const logger = createLogger('error');
 
-function request(path: string, init: RequestInit = {}) {
-  return app.request(path, init, env);
+function request(path: string, init: RequestInit = {}, withEnv: Env = env) {
+  return app.request(path, init, withEnv);
 }
 
-function createScan(body: unknown, headers: Record<string, string> = {}) {
-  return request('/api/scans', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', ...headers },
-    body: JSON.stringify(body),
-  });
+function createScan(body: unknown, headers: Record<string, string> = {}, withEnv: Env = env) {
+  return request(
+    '/api/scans',
+    { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(body) },
+    withEnv,
+  );
 }
 
 /** Runs queue steps the way the consumer does, until the scan finishes or a step asks to wait. */
-async function drive(scanId: string, fromStep = 0) {
-  const { runner } = buildServices(env, logger, fakeFetch);
+async function drive(scanId: string, fromStep = 0, withEnv: Env = env) {
+  const { runner } = buildServices(withEnv, logger, fakeFetch);
   let step = fromStep;
   for (let i = 0; i < 30; i++) {
     const outcome = await runner.step(scanId, step);
@@ -173,7 +177,7 @@ beforeEach(async () => {
   aiCalls.length = 0;
   aiAnswer = goodAiAnswer;
   await env.DB.batch(
-    ['release_sources', 'upgrade_analyses', 'dependencies', 'scans', 'repositories', 'registry_cache'].map((t) =>
+    ['release_sources', 'upgrade_analyses', 'dependencies', 'scans', 'repositories', 'registry_cache', 'rate_counters'].map((t) =>
       env.DB.prepare(`DELETE FROM ${t}`),
     ),
   );
@@ -221,6 +225,11 @@ describe('scan pipeline', () => {
       { source_type: 'npm_metadata', retrieval_status: 'ok', version: '19.1.0' },
     ]);
 
+    const investigate = DependencyListResponseSchema.parse(
+      await (await request(`/api/scans/${scanId}/dependencies?recommendation=investigate&sort=riskLevel`)).json(),
+    );
+    expect(investigate.items.map((d) => d.name).sort()).toEqual(['left-pad', 'react']);
+
     const filtered = DependencyListResponseSchema.parse(
       await (await request(`/api/scans/${scanId}/dependencies?upgradeType=minor&q=pad`)).json(),
     );
@@ -249,6 +258,25 @@ describe('scan pipeline', () => {
     expect(markdown.headers.get('content-type')).toContain('text/markdown');
     expect(markdown.headers.get('content-disposition')).toContain('upgradepilot-acme-shop-c0ffee0.md');
     expect(await markdown.text()).toContain('# Upgrade report: acme/shop');
+
+    // Dashboard, repository list, history and dependency detail read the same rows.
+    const dashboard = DashboardResponseSchema.parse(await (await request('/api/dashboard')).json());
+    expect(dashboard.totals).toEqual({ repositories: 1, dependencies: 3, outdated: 2, highRisk: 2 });
+    expect(dashboard.recentScans[0]).toMatchObject({ id: scanId, status: 'COMPLETED', totals: { outdated: 2 } });
+
+    const repositories = RepositoryListResponseSchema.parse(await (await request('/api/repositories')).json());
+    expect(repositories.items[0]).toMatchObject({ owner: 'acme', name: 'shop', scanCount: 1, lastScan: { id: scanId } });
+    const history = ScanHistoryResponseSchema.parse(
+      await (await request(`/api/repositories/${repositories.items[0]?.id}/scans`)).json(),
+    );
+    expect(history.items.map((item) => item.id)).toEqual([scanId]);
+
+    const detail = DependencyDetailSchema.parse(
+      await (await request(`/api/scans/${scanId}/dependencies/${list.items[0]?.id}`)).json(),
+    );
+    expect(detail.analysis?.summary).toBe('React 19 removes legacy context.');
+    expect(detail.evidence.find((e) => e.sourceType === 'changelog')?.excerpt).toContain('Removed legacy context');
+    expect((await request(`/api/scans/${scanId}/dependencies/nope`)).status).toBe(404);
   });
 
   it('re-analyses from cache, or from the model when forced', async () => {
@@ -332,6 +360,54 @@ describe('scan pipeline', () => {
 
     delete overrides['registry.npmjs.org/-/package/left-pad/dist-tags'];
     expect(await drive(scanId, 3)).toEqual({ kind: 'finished', status: 'COMPLETED' });
+  });
+
+  it('marks a package unavailable when npm keeps failing, and still completes', async () => {
+    overrides['registry.npmjs.org/-/package/left-pad/dist-tags'] = () => json({ error: 'down' }, { status: 503 });
+    const { scanId } = CreateScanResponseSchema.parse(
+      await (await createScan({ url: 'https://github.com/acme/shop', branch: 'main' })).json(),
+    );
+    expect(await drive(scanId)).toEqual({ kind: 'finished', status: 'COMPLETED' });
+    const leftPad = DependencyListResponseSchema.parse(
+      await (await request(`/api/scans/${scanId}/dependencies?q=left-pad`)).json(),
+    ).items[0];
+    expect(leftPad).toMatchObject({ upgradeType: 'unresolved', registryError: 'REGISTRY_UNAVAILABLE' });
+  });
+
+  it('caps scan creation per hour and AI analyses per day', async () => {
+    const limited = { ...env, RATE_LIMIT_SCANS_PER_HOUR: '1', AI_MAX_ANALYSES_PER_DAY: '0' } as unknown as Env;
+    const first = await createScan({ url: 'https://github.com/acme/shop', branch: 'main' }, {}, limited);
+    expect(first.status).toBe(201);
+    const second = await createScan({ url: 'https://github.com/acme/shop', branch: 'dev' }, {}, limited);
+    expect(second.status).toBe(429);
+    expect(Number(second.headers.get('retry-after'))).toBeGreaterThan(0);
+    expect(ErrorResponseSchema.parse(await second.json()).error.code).toBe('RATE_LIMITED');
+
+    const { scanId } = CreateScanResponseSchema.parse(await first.json());
+    expect(await drive(scanId, 0, limited)).toEqual({ kind: 'finished', status: 'COMPLETED' });
+    expect(aiCalls).toHaveLength(0);
+    const react = DependencyListResponseSchema.parse(
+      await (await request(`/api/scans/${scanId}/dependencies?q=react`)).json(),
+    ).items[0];
+    expect(react).toMatchObject({ analysisStatus: 'skipped', riskLevel: 'high' });
+  });
+
+  it('fails a scan whose steps keep getting killed, and rejects non-JSON bodies', async () => {
+    const { scanId } = CreateScanResponseSchema.parse(
+      await (await createScan({ url: 'https://github.com/acme/shop', branch: 'main' })).json(),
+    );
+    // Four leases already taken by runs that died without reporting back.
+    await env.DB.prepare('UPDATE scans SET attempt_count = 4 WHERE id = ?').bind(scanId).run();
+    const { runner } = buildServices(env, logger, fakeFetch);
+    expect(await runner.step(scanId, 0)).toEqual({ kind: 'finished', status: 'FAILED' });
+    expect(ScanSchema.parse(await (await request(`/api/scans/${scanId}`)).json()).errorMessage).toContain('stopped making progress');
+
+    const plain = await request('/api/scans', {
+      method: 'POST',
+      headers: { 'content-type': 'text/plain' },
+      body: JSON.stringify({ url: 'https://github.com/acme/shop', branch: 'main' }),
+    });
+    expect(plain.status).toBe(415);
   });
 
   it('recovers an interrupted step and drops stale messages', async () => {

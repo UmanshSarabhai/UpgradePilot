@@ -11,10 +11,22 @@
     // workers-ai | anthropic | openai | none. Anthropic and OpenAI need ANTHROPIC_API_KEY / OPENAI_API_KEY secrets.
     "AI_PROVIDER": "workers-ai",
     // Upgrades analysed by AI per scan. The Workers AI free tier covers roughly 27 analyses a day.
-    "AI_MAX_ANALYSES_PER_SCAN": "10"
+    "AI_MAX_ANALYSES_PER_SCAN": "10",
+    // Model calls per UTC day across all scans. Keeps a public demo inside the Workers AI free tier.
+    "AI_MAX_ANALYSES_PER_DAY": "25",
+    // Hourly caps on the endpoints that spend GitHub, npm and D1 quota (global, not per visitor).
+    "RATE_LIMIT_INSPECT_PER_HOUR": "60",
+    "RATE_LIMIT_SCANS_PER_HOUR": "20",
+    "RATE_LIMIT_REANALYZE_PER_HOUR": "20"
   },
   "ai": {
     "binding": "AI"
+  },
+  // The Next.js static export (apps/web). /api/* runs the Worker; everything else is a static file.
+  "assets": {
+    "directory": "../web/out",
+    "not_found_handling": "404-page",
+    "run_worker_first": ["/api/*"]
   },
   "d1_databases": [
     {

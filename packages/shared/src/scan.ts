@@ -96,7 +96,7 @@ export const DependencyRowSchema = z.object({
 export type DependencyRow = z.infer<typeof DependencyRowSchema>;
 
 export const DependencyListQuerySchema = z.object({
-  page: z.coerce.number().int().min(1).default(1),
+  page: z.coerce.number().int().min(1).max(1000).default(1),
   pageSize: z.coerce.number().int().min(1).max(100).default(50),
   upgradeType: UpgradeTypeSchema.optional(),
   dependencyType: DependencyTypeSchema.optional(),

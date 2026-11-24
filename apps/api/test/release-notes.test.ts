@@ -1,3 +1,4 @@
+import semver from 'semver';
 import { describe, expect, it } from 'vitest';
 import { UpstreamError } from '../src/lib/errors';
 import { createReleaseNotesService } from '../src/modules/release-notes/release-notes-service';
@@ -211,6 +212,35 @@ describe('release notes service', () => {
     expect(releases[0]?.contentExcerpt).not.toBeNull();
     expect(releases[1]?.contentExcerpt).toBeNull();
     expect(releases[1]?.contentHash).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('keeps at most 20 releases: up to 10 majors first, then the newest others, newest first', async () => {
+    const tags: string[] = [];
+    for (let major = 1; major <= 12; major++) tags.push(`v${major}.0.0`);
+    for (let minor = 1; minor <= 30; minor++) tags.push(`v12.${minor}.0`);
+    const { service } = fake({ releases: tags.map((t) => release(t)) });
+    const out = await service.collect({ ...base, currentVersion: '0.5.0', targetVersion: '12.30.0', upgradeType: 'major' });
+    const versions = out.filter((e) => e.sourceType === 'github_release').map((e) => e.version);
+    expect(versions).toHaveLength(20);
+    // 10 newest majors (3.0.0 to 12.0.0) plus the 10 newest other releases (12.21.0 to 12.30.0).
+    expect(versions[0]).toBe('12.30.0');
+    expect(versions).toContain('3.0.0');
+    expect(versions).not.toContain('2.0.0');
+    expect(versions).not.toContain('12.20.0');
+    expect(versions).toEqual(
+      [...versions].sort((a, b) => semver.rcompare(a ?? '', b ?? '')),
+    );
+  });
+
+  it('skips very long changelog lines without slow regex work', async () => {
+    const long = '#' + ' 1.2.3.4.5.6.7.8.9.'.repeat(5_300);
+    expect(long.length).toBeGreaterThan(100_000);
+    const changelog = `# Changelog\n\n## 2.0.0\n\nNew stuff\n\n${long}\n\n## 1.1.0\n\nOld\n\n## 1.0.0\n`;
+    const { service } = fake({ files: { 'CHANGELOG.md': changelog } });
+    const start = performance.now();
+    const out = await service.collect(base);
+    expect(performance.now() - start).toBeLessThan(100);
+    expect(out.find((e) => e.sourceType === 'changelog')?.retrievalStatus).toBe('ok');
   });
 
   it('gives excerpt budget to major releases before newer minor ones', async () => {

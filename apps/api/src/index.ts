@@ -45,11 +45,13 @@ export default {
   async scheduled(_controller, env) {
     const logger = createLogger(env.LOG_LEVEL, { cron: 'sweep' });
     const { store } = buildServices(env, logger);
+    // Scans that keep getting killed are re-queued too: the runner fails them once their attempts run out.
     const stale = await store.listStale(new Date(Date.now() - STALE_AFTER_MS).toISOString(), SWEEP_LIMIT);
     for (const scan of stale) {
       await env.SCAN_QUEUE.send({ scanId: scan.id, step: scan.stepSeq } satisfies ScanMessage);
     }
     await store.purgeExpiredCache(Date.now());
+    await store.purgeOldQuotaWindows(Date.now());
     if (stale.length > 0) logger.info('re-enqueued stale scans', { count: stale.length });
   },
 } satisfies ExportedHandler<Env, unknown>;

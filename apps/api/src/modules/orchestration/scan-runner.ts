@@ -26,6 +26,8 @@ export interface ScanRunnerOptions {
   nowMs?: () => number;
   leaseMs?: number;
   maxAttempts?: number;
+  /** Total time a scan may take, rate-limit waits included, before it is failed. */
+  maxScanMs?: number;
 }
 
 const MIN_RATE_LIMIT_WAIT_S = 30;
@@ -42,6 +44,7 @@ export function createScanRunner(options: ScanRunnerOptions) {
   const nowMs = options.nowMs ?? Date.now;
   const leaseMs = options.leaseMs ?? 120_000;
   const maxAttempts = options.maxAttempts ?? 4;
+  const maxScanMs = options.maxScanMs ?? 6 * 3600_000;
   const iso = (ms: number) => new Date(ms).toISOString();
 
   async function handleFailure(scan: ScanRecord, leaseUntil: string, error: unknown, log: Logger): Promise<StepOutcome> {
@@ -82,6 +85,19 @@ export function createScanRunner(options: ScanRunnerOptions) {
       if (!scan || scan.status === 'COMPLETED' || scan.status === 'FAILED') return { kind: 'skipped' };
 
       const log = logger.child({ scanId, status: scan.status, step: scan.stepSeq });
+
+      // A step killed by the CPU or memory limit never reaches handleFailure, but its lease still counted an attempt.
+      if (scan.attemptCount > maxAttempts) {
+        log.error('scan failed: attempts exhausted', { attempt: scan.attemptCount });
+        await store.fail(scan.id, leaseUntil, 'The scan stopped making progress and was cancelled.');
+        return { kind: 'finished', status: 'FAILED' };
+      }
+      if (scan.startedAt && nowMs() - new Date(scan.startedAt).getTime() > maxScanMs) {
+        log.error('scan failed: deadline exceeded');
+        await store.fail(scan.id, leaseUntil, 'The scan took longer than the time limit and was cancelled.');
+        return { kind: 'finished', status: 'FAILED' };
+      }
+
       let result: StageResult;
       try {
         result = await stages[scan.status](scan);

@@ -153,3 +153,38 @@ Smaller calls made while building, in order.
 | Live run: local "Binding AI needs to be run remotely" was recorded as `failed` | Leave it; treat as unavailable | Unavailable: it stops further AI calls for the scan and marks the rest `skipped` with the reason. |
 | Live run: summary said "0 patch, 0 minor, 1 major" and "1 dependencies" | Leave it | Zero counts dropped, singular fixed, test updated. |
 | Subagent reports: SDK schema errors come back with the SDK's wording; total evidence cap includes file excerpts | Normalise the message; separate caps | Kept both. The outcome is still `failed` with a reason, and one cap keeps the prompt inside Llama's 24k context. |
+
+### Phase 4 (24 Nov 2026)
+
+| Situation | Options considered | Chosen, and why |
+| --- | --- | --- |
+| Next.js 16.4 is newer than the training data of the agents writing it | Write from memory, or read the bundled docs | Read `node_modules/next/dist/docs` first (the scaffold's `AGENTS.md` asks for this). It confirmed rewrites are not allowed with `output: "export"` and that `useSearchParams` needs a `Suspense` boundary. |
+| Local dev needs `/api` on the same origin, but static export forbids rewrites | CORS on the API; phase-aware `next.config` | Phase-aware config: dev server proxies `/api` to `wrangler dev`, production build is a static export. No CORS code in the API. |
+| `cacheComponents` and `partialPrefetching` from the scaffold | Keep, or drop | Dropped. The site is a client-rendered static export, so server caching adds nothing. |
+| Routes for unknown IDs | Dynamic routes with `generateStaticParams`; query parameters | Query parameters (`/scan/?id=`). A static export cannot pre-render IDs that do not exist at build time. |
+| shadcn 4.23 added `cn` and `shadcn` as runtime dependencies | Swap for `clsx` + `tailwind-merge`; keep | Keep. The generated components import `cn`, and `globals.css` imports `shadcn/tailwind.css`. `cn` is published by shadcn (`shadcn-ui/cn`). |
+| TypeScript version in the web app | TypeScript 7 like the API; 5 | 5. Next.js type-checks through the TypeScript compiler API, which the native TypeScript 7 build may not provide. Workspaces allow different versions. |
+| ESLint from the scaffold | Keep; remove | Removed. The project uses `tsc` and tests as checks; ESLint was never part of the plan. |
+| Wrangler needs `apps/web/out` to exist even for API-only dev and tests | Commit a placeholder; create it on demand | `predev`, `pretest` and `predev:remote-ai` scripts create the folder. `predeploy` builds the site. |
+| Work split | One agent, or parallel | Three subagents in parallel (dashboard, scan page and detail panel, report view and repository pages) on top of shared pieces I wrote first: API client with Zod validation, query hooks, badges, state components, layout, and a stub `ReportView` so the scan page could import it before it existed. |
+| Parallel agents each wrote a `safe-link.tsx` helper | Keep both; merge | Merged into `components/safe-link.tsx` with one `isHttpUrl` check. Every call site already checked the URL first, so behaviour did not change. |
+| Live check: the page background showed the browser's dark canvas | Opaque body colour; background on `<html>` | `bg-background` on `<html>`. The body's translucent tint then sits on white as intended. |
+| Live check method | Screenshots only; driving the real flow | Drove the real flow in the in-app browser against the Worker serving the built site: check repository, start a scan of vercel/ms, watch progress, open a dependency, read the report, view history, and check 375px width (no horizontal scroll) and the console (no errors). |
+
+### Phase 5 (24 Nov 2026)
+
+| Situation | Options considered | Chosen, and why |
+| --- | --- | --- |
+| Security review | Review my own code; an independent agent | An independent agent given the code and the spec's security list, not my conclusions. It found 2 high, 4 medium and 6 low issues plus a functional bug; all were checked against the code and fixed. |
+| H1: crafted workspace globs and long changelog lines caused regex backtracking (24 s measured); a step killed by the CPU limit never reported failure, so the cron retried it forever | Timeouts; rewrite matchers; attempt cap | Both. Workspace globs are matched segment by segment with a two-pointer wildcard matcher (no regex); changelog lines over 200 characters are skipped. The runner fails a scan once its lease count passes 4, which catches killed runs. |
+| Sweep filter for exhausted scans | Exclude them from the sweep; keep sweeping them | Keep sweeping. Excluding them would leave a scan whose queue retries ran out stuck forever, blocking its branch. The runner fails it on the next lease instead. |
+| H2: one scan had no size cap | Cap packages, evidence, GitHub calls | 300 distinct packages per scan (with a warning when truncated) and 20 release items per upgrade (majors first). With those caps, GitHub calls are bounded too. |
+| Rate limiting for a public demo | Workers rate-limiting binding; D1 counters | D1 counters: exact, testable locally, and confirmed on Free. Global caps protect quotas; per-client caps (hashed IP, a quarter of the global cap) stop one caller from locking everyone out. Counters no longer write when over the limit. |
+| M2: dashboard reads every scan per call | Precomputed totals; indexes and cache | Indexes (`scans(created_at)`, `scans(repository_id, status, created_at)`) and a 10-second per-isolate cache. Totals stay exact. |
+| M3: re-analysis bypassed the per-scan AI budget | Disable `force`; count it | Count it: the per-scan AI cap is now a lifetime counter covering re-analysis, so `force` cannot drain the daily cap. |
+| M4: rate-limited scans waited forever | Count waits as attempts; deadline | A 6-hour deadline from the start of the run. Reanalysis resets the start time. |
+| Low findings | Fix or note | Fixed: prompt strings sanitised and tag-neutralised (attributes too), Markdown escaping widened, `page` capped, JSON-only POST bodies (415), remaining raw links use `SafeLink`, provider error text replaced with fixed messages. |
+| Functional bug from the review: `recommendation` filter and `riskLevel` sort were never applied | Fix | Fixed in the store; covered by the scan-flow test and checked live. |
+| Example report | Fabricate a polished one; export a real scan | A real export of `vercel/ms` with AI off, labelled as such. |
+| Deployment | Deploy from here; document and dry-run | Documented in `DEPLOYMENT.md` and verified with `wrangler deploy --dry-run` (430 KB gzipped). The real deploy needs the owner's Cloudflare login. |
+| Security headers | None; CSP | `_headers` for static pages (CSP with `'unsafe-inline'` scripts, which the Next.js export needs), Hono `secureHeaders()` for API responses. Checked in the browser: no CSP violations. |

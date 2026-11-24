@@ -1,6 +1,10 @@
 import type {
   Advisory,
   AnalysisStatus,
+  DependencyDetail,
+  RepositoryInfo,
+  RepositoryListItem,
+  ScanSummary,
   DependencyListQuery,
   DependencyRow,
   DiscoveredDependency,
@@ -168,6 +172,70 @@ const ANALYSIS_SELECT = `
          ua.migration_steps, ua.affected_files, ua.compatibility_concerns, ua.confidence, ua.recommendation,
          ua.is_inconclusive, ua.evidence
   FROM upgrade_analyses ua JOIN dependencies d ON d.id = ua.dependency_id`;
+
+const UPGRADES = `('patch', 'minor', 'major')`;
+
+/** Scans with headline counts. Callers append WHERE / ORDER BY / LIMIT. */
+const SCAN_SUMMARY_SELECT = `
+  SELECT s.id, s.repository_id, r.owner, r.name, s.branch, s.commit_sha, s.status, s.progress, s.error_message,
+         s.created_at, s.completed_at,
+         (SELECT COUNT(*) FROM dependencies d WHERE d.scan_id = s.id) AS dependency_count,
+         (SELECT COUNT(*) FROM dependencies d WHERE d.scan_id = s.id AND d.upgrade_type IN ${UPGRADES}) AS outdated_count,
+         (SELECT COUNT(*) FROM dependencies d
+            WHERE d.scan_id = s.id AND d.upgrade_type IN ${UPGRADES} AND d.risk_level = 'high') AS high_risk_count
+  FROM scans s JOIN repositories r ON r.id = s.repository_id`;
+
+interface ScanSummaryRow {
+  id: string;
+  repository_id: string;
+  owner: string;
+  name: string;
+  branch: string;
+  commit_sha: string | null;
+  status: ScanStatus;
+  progress: number;
+  error_message: string | null;
+  created_at: string;
+  completed_at: string | null;
+  dependency_count: number;
+  outdated_count: number;
+  high_risk_count: number;
+}
+
+function toScanSummary(row: ScanSummaryRow): ScanSummary {
+  return {
+    id: row.id,
+    repository: { id: row.repository_id, owner: row.owner, name: row.name },
+    branch: row.branch,
+    commitSha: row.commit_sha,
+    status: row.status,
+    progress: row.progress,
+    errorMessage: row.error_message,
+    createdAt: row.created_at,
+    completedAt: row.completed_at,
+    totals: { dependencies: row.dependency_count, outdated: row.outdated_count, highRisk: row.high_risk_count },
+  };
+}
+
+interface RepositoryRow {
+  id: string;
+  owner: string;
+  name: string;
+  github_url: string;
+  default_branch: string;
+  primary_language: string | null;
+}
+
+function toRepositoryInfo(row: RepositoryRow): RepositoryInfo {
+  return {
+    id: row.id,
+    owner: row.owner,
+    name: row.name,
+    url: row.github_url,
+    defaultBranch: row.default_branch,
+    primaryLanguage: row.primary_language,
+  };
+}
 
 interface ScanRow {
   id: string;
@@ -603,6 +671,10 @@ export function createScanStore(db: D1Database, now: () => string = () => new Da
         where.push('risk_level = ?');
         params.push(query.riskLevel);
       }
+      if (query.recommendation) {
+        where.push('recommendation = ?');
+        params.push(query.recommendation);
+      }
       if (query.q) {
         where.push(`package_name LIKE ? ESCAPE '\\'`);
         params.push(`%${query.q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`);
@@ -611,7 +683,9 @@ export function createScanStore(db: D1Database, now: () => string = () => new Da
       const order =
         query.sort === 'upgradeType'
           ? `CASE upgrade_type WHEN 'major' THEN 0 WHEN 'minor' THEN 1 WHEN 'patch' THEN 2 WHEN 'unresolved' THEN 3 ELSE 4 END, package_name, manifest_path`
-          : 'package_name, manifest_path';
+          : query.sort === 'riskLevel'
+            ? `CASE risk_level WHEN 'high' THEN 0 WHEN 'medium' THEN 1 WHEN 'low' THEN 2 WHEN 'unknown' THEN 3 ELSE 4 END, package_name, manifest_path`
+            : 'package_name, manifest_path';
 
       const [rows, count] = await db.batch([
         db
@@ -939,9 +1013,9 @@ export function createScanStore(db: D1Database, now: () => string = () => new Da
           db
             .prepare(
               `UPDATE scans SET status = 'ANALYZING_UPGRADES', progress = 75, current_stage = 'Re-analysing upgrades',
-                 completed_at = NULL, report = NULL, error_message = NULL, attempt_count = 0,
-                 lease_expires_at = NULL, next_attempt_at = NULL, step_seq = step_seq + 1, updated_at = ?
-               WHERE id = ? AND status = 'COMPLETED'`,
+                 started_at = ?1, completed_at = NULL, report = NULL, error_message = NULL, attempt_count = 0,
+                 lease_expires_at = NULL, next_attempt_at = NULL, step_seq = step_seq + 1, updated_at = ?1
+               WHERE id = ?2 AND status = 'COMPLETED'`,
             )
             .bind(timestamp, scanId),
           db
@@ -965,6 +1039,135 @@ export function createScanStore(db: D1Database, now: () => string = () => new Da
         }
         throw error;
       }
+    },
+
+    /** Repositories, most recently updated first, each with its newest scan. */
+    async listRepositories(page: number, pageSize: number): Promise<{ items: RepositoryListItem[]; total: number }> {
+      const [rows, count] = await db.batch([
+        db
+          .prepare(
+            `SELECT r.id, r.owner, r.name, r.github_url, r.default_branch, r.primary_language,
+                    (SELECT COUNT(*) FROM scans WHERE repository_id = r.id) AS scan_count,
+                    (SELECT id FROM scans WHERE repository_id = r.id ORDER BY created_at DESC LIMIT 1) AS last_scan_id
+             FROM repositories r ORDER BY r.updated_at DESC LIMIT ? OFFSET ?`,
+          )
+          .bind(pageSize, (page - 1) * pageSize),
+        db.prepare('SELECT COUNT(*) AS total FROM repositories'),
+      ]);
+      const repositories = (rows?.results ?? []) as Array<RepositoryRow & { scan_count: number; last_scan_id: string | null }>;
+      const lastScanIds = repositories.map((r) => r.last_scan_id).filter((id): id is string => id !== null);
+      const summaries = new Map<string, ScanSummary>();
+      if (lastScanIds.length > 0) {
+        const { results } = await db
+          .prepare(`${SCAN_SUMMARY_SELECT} WHERE s.id IN (${lastScanIds.map(() => '?').join(', ')})`)
+          .bind(...lastScanIds)
+          .all<ScanSummaryRow>();
+        for (const row of results) summaries.set(row.id, toScanSummary(row));
+      }
+      return {
+        items: repositories.map((r) => ({
+          ...toRepositoryInfo(r),
+          scanCount: r.scan_count,
+          lastScan: r.last_scan_id ? (summaries.get(r.last_scan_id) ?? null) : null,
+        })),
+        total: ((count?.results ?? []) as Array<{ total: number }>)[0]?.total ?? 0,
+      };
+    },
+
+    async getRepository(id: string): Promise<RepositoryInfo | null> {
+      const row = await db
+        .prepare('SELECT id, owner, name, github_url, default_branch, primary_language FROM repositories WHERE id = ?')
+        .bind(id)
+        .first<RepositoryRow>();
+      return row ? toRepositoryInfo(row) : null;
+    },
+
+    async listScans(repositoryId: string, page: number, pageSize: number): Promise<{ items: ScanSummary[]; total: number }> {
+      const [rows, count] = await db.batch([
+        db
+          .prepare(`${SCAN_SUMMARY_SELECT} WHERE s.repository_id = ? ORDER BY s.created_at DESC LIMIT ? OFFSET ?`)
+          .bind(repositoryId, pageSize, (page - 1) * pageSize),
+        db.prepare('SELECT COUNT(*) AS total FROM scans WHERE repository_id = ?').bind(repositoryId),
+      ]);
+      return {
+        items: ((rows?.results ?? []) as ScanSummaryRow[]).map(toScanSummary),
+        total: ((count?.results ?? []) as Array<{ total: number }>)[0]?.total ?? 0,
+      };
+    },
+
+    /** Totals over the newest completed scan of each repository, plus the most recent scans. */
+    async dashboard(recentLimit: number) {
+      const [totals, recent] = await db.batch([
+        db.prepare(
+          `WITH latest AS (
+             SELECT s.id FROM scans s
+             WHERE s.status = 'COMPLETED' AND s.created_at = (
+               SELECT MAX(created_at) FROM scans WHERE repository_id = s.repository_id AND status = 'COMPLETED'))
+           SELECT (SELECT COUNT(*) FROM repositories) AS repositories,
+                  COUNT(d.id) AS dependencies,
+                  COALESCE(SUM(d.upgrade_type IN ${UPGRADES}), 0) AS outdated,
+                  COALESCE(SUM(d.upgrade_type IN ${UPGRADES} AND d.risk_level = 'high'), 0) AS high_risk
+           FROM latest l LEFT JOIN dependencies d ON d.scan_id = l.id`,
+        ),
+        db.prepare(`${SCAN_SUMMARY_SELECT} ORDER BY s.created_at DESC LIMIT ?`).bind(recentLimit),
+      ]);
+      const row = ((totals?.results ?? []) as Array<{ repositories: number; dependencies: number; outdated: number; high_risk: number }>)[0];
+      return {
+        totals: {
+          repositories: row?.repositories ?? 0,
+          dependencies: row?.dependencies ?? 0,
+          outdated: row?.outdated ?? 0,
+          highRisk: row?.high_risk ?? 0,
+        },
+        recentScans: ((recent?.results ?? []) as ScanSummaryRow[]).map(toScanSummary),
+      };
+    },
+
+    /** One dependency with its risk details, advisories, latest analysis and evidence (with excerpts). */
+    async dependencyDetail(scanId: string, dependencyId: string): Promise<DependencyDetail | null> {
+      const [deps, analyses] = await db.batch([
+        db.prepare('SELECT * FROM dependencies WHERE id = ? AND scan_id = ?').bind(dependencyId, scanId),
+        db.prepare(`${ANALYSIS_SELECT} WHERE ua.dependency_id = ? ORDER BY ua.created_at DESC LIMIT 1`).bind(dependencyId),
+      ]);
+      const row = ((deps?.results ?? []) as Array<
+        DependencyDbRow & { risk_factors: string | null; advisories: string | null; analysis_note: string | null }
+      >)[0];
+      if (!row) return null;
+      const analysis = ((analyses?.results ?? []) as AnalysisDbRow[])[0];
+      const evidence = (await this.evidenceByDependency({ dependencyId }, true))[dependencyId] ?? [];
+      return {
+        dependency: toDependencyRow(row),
+        riskDetails: parseJsonOr<RiskDetails | null>(row.risk_factors, null),
+        advisories:
+          row.advisories === null || row.advisories === 'unavailable' ? null : parseJsonOr<Advisory[] | null>(row.advisories, null),
+        analysis: analysis ? toAnalysis(analysis) : null,
+        analysisNote: row.analysis_note,
+        evidence,
+      };
+    },
+
+    /**
+     * Counts one use of `key` in the current fixed window and reports whether it is within `limit`.
+     */
+    async consumeQuota(key: string, limit: number, windowSeconds: number, nowMs = Date.now()) {
+      const nowSeconds = Math.floor(nowMs / 1000);
+      const windowStart = nowSeconds - (nowSeconds % windowSeconds);
+      const retryAfterSeconds = windowStart + windowSeconds - nowSeconds;
+      if (limit <= 0) return { allowed: false, retryAfterSeconds };
+      // The increment only happens while under the limit, so rejected requests write nothing.
+      const row = await db
+        .prepare(
+          `INSERT INTO rate_counters (key, window_start, count) VALUES (?, ?, 1)
+           ON CONFLICT (key, window_start) DO UPDATE SET count = count + 1 WHERE count < ?
+           RETURNING count`,
+        )
+        .bind(key, windowStart, limit)
+        .first<{ count: number }>();
+      return { allowed: row !== null, retryAfterSeconds };
+    },
+
+    async purgeOldQuotaWindows(nowMs: number): Promise<void> {
+      await db.prepare('DELETE FROM rate_counters WHERE window_start < ?').bind(Math.floor(nowMs / 1000) - 2 * 86_400).run();
     },
   };
 }

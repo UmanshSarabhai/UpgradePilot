@@ -3,7 +3,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/app';
 import { parseGitHubRepoUrl } from '../src/modules/repository/github-url';
 
-const env = { LOG_LEVEL: 'error', DB: {} } as unknown as Env;
+// The inspect route records one rate-limit count in D1; this stand-in accepts it.
+const fakeDb = { prepare: () => ({ bind: () => ({ first: async () => ({ count: 1 }) }) }) };
+const env = { LOG_LEVEL: 'error', DB: fakeDb } as unknown as Env;
 
 const repoJson = {
   name: 'next.js',

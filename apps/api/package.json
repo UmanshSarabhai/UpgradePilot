@@ -3,13 +3,17 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "predev": "node -e \"require('fs').mkdirSync('../web/out',{recursive:true})\"",
     "dev": "wrangler dev --local",
+    "predeploy": "npm run build -w @upgradepilot/web",
     "deploy": "wrangler deploy",
+    "pretest": "node -e \"require('fs').mkdirSync('../web/out',{recursive:true})\"",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "cf-typegen": "wrangler types",
     "db:migrate:local": "wrangler d1 migrations apply upgradepilot --local",
     "db:migrate:remote": "wrangler d1 migrations apply upgradepilot --remote",
+    "predev:remote-ai": "node -e \"require('fs').mkdirSync('../web/out',{recursive:true})\"",
     "dev:remote-ai": "wrangler dev"
   },
   "dependencies": {

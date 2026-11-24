@@ -9,6 +9,10 @@ const MAX_FILE_BYTES = 2 * 1024 * 1024;
 const TOTAL_EXCERPT_CHARS = 16_000;
 const ITEM_EXCERPT_CHARS = 6_000;
 const TRUNCATED = '\n[truncated]';
+const MAX_RELEASE_ITEMS = 20;
+const MAX_MAJOR_RELEASES = 10;
+/** Changelog lines longer than this are never run through a regex (ReDoS guard). */
+const MAX_HEADING_LINE_CHARS = 200;
 
 /** An evidence item plus the full content its excerpt is cut from. */
 interface Draft {
@@ -57,10 +61,11 @@ function versionFromTag(tag: string, packageName: string): string | null {
 
 /** Keeps the sections whose heading names a version in range. Returns null when none match. */
 function extractChangelogSections(markdown: string, input: ReleaseNotesInput): string | null {
-  const lines = markdown.split(/\r?\n/);
+  const lines = markdown.split('\n');
   const headings: { index: number; level: number; version: string | null }[] = [];
   for (const [index, line] of lines.entries()) {
-    const m = /^(#{1,3})\s+(.*)$/.exec(line);
+    if (line.length > MAX_HEADING_LINE_CHARS) continue;
+    const m = /^(#{1,3})\s+(.*?)\r?$/.exec(line);
     if (!m) continue;
     const found = /\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?/.exec(m[2] ?? '');
     headings.push({ index, level: (m[1] ?? '').length, version: found ? semver.valid(found[0]) : null });
@@ -101,7 +106,12 @@ export function createReleaseNotesService({ github }: { github: GitHubClient }):
         .map((r) => ({ release: r, version: versionFromTag(r.tag_name, input.packageName) }))
         .filter((m): m is { release: typeof m.release; version: string } => inRange(m.version, input))
         .sort((a, b) => semver.rcompare(a.version, b.version));
-      for (const { release, version } of matched) {
+      // Keep at most MAX_RELEASE_ITEMS: major releases (x.0.0, at most MAX_MAJOR_RELEASES) first, then the newest others.
+      const isMajor = (m: { version: string }) => semver.minor(m.version) === 0 && semver.patch(m.version) === 0;
+      const majors = matched.filter(isMajor).slice(0, MAX_MAJOR_RELEASES);
+      const others = matched.filter((m) => !isMajor(m)).slice(0, MAX_RELEASE_ITEMS - majors.length);
+      const kept = [...majors, ...others].sort((a, b) => semver.rcompare(a.version, b.version));
+      for (const { release, version } of kept) {
         const body = release.body ?? '';
         drafts.push({
           content: body,

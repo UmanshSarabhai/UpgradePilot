@@ -43,7 +43,7 @@ export function createOpenAiProvider(config: {
         });
       }
       if (response.status === 401 || response.status === 403 || response.status === 404) {
-        throw new AiUnavailableError(`OpenAI is unavailable (HTTP ${response.status})`);
+        throw new AiUnavailableError('OpenAI is unavailable (quota, credentials, or local dev without Workers AI).');
       }
       if (!response.ok) throw new Error(`OpenAI request failed (HTTP ${response.status})`);
 

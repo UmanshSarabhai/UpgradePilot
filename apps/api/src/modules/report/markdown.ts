@@ -2,7 +2,7 @@ import type { Finding, Report, ReportEntry } from '@upgradepilot/shared';
 
 /** Escape Markdown-significant characters in untrusted text. */
 function esc(text: string): string {
-  return text.replace(/\s*[\r\n]+\s*/g, ' ').replace(/[\\|`<>[\]]/g, (c) => `\\${c}`);
+  return text.replace(/\s*[\r\n]+\s*/g, ' ').replace(/[\\|`<>[\]*_#!()~&]/g, (c) => `\\${c}`);
 }
 
 /** A link for http(s) URLs only; anything else renders as plain text. */
@@ -71,7 +71,9 @@ export function renderMarkdown(report: Report): string {
   const { repository: r, totals: t, ai } = report;
   const aiLine = ai.provider
     ? `AI analysis: ${esc(ai.provider)}/${esc(ai.model ?? 'unknown')}, ${ai.analyzed} upgrades analysed`
-    : `AI analysis: off${ai.note ? ` (${esc(ai.note)})` : ''}`;
+    : ai.note?.startsWith('AI analysis')
+      ? esc(ai.note)
+      : `AI analysis: off${ai.note ? ` (${esc(ai.note)})` : ''}`;
   const out: string[] = [
     `# Upgrade report: ${esc(r.owner)}/${esc(r.name)}`,
     '',

@@ -1,6 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { zodOutputFormat } from '@anthropic-ai/sdk/helpers/zod';
 import { UpstreamError } from '../../lib/errors';
+import { AiPublicError } from './prompt';
 import { AiUnavailableError, type AiProvider } from './types';
 
 export const ANTHROPIC_DEFAULT_MODEL = 'claude-opus-5-5';
@@ -36,7 +37,7 @@ export function createAnthropicProvider(config: {
           messages: [{ role: 'user', content: request.user }],
           output_config: { format: zodOutputFormat(request.schema), effort: 'medium' },
         });
-        if (message.stop_reason === 'refusal') throw new Error('The model declined to analyse this upgrade');
+        if (message.stop_reason === 'refusal') throw new AiPublicError('The model declined to analyse this upgrade');
         if (message.parsed_output === null) throw new Error('The model returned no structured output');
         return message.parsed_output;
       } catch (error) {
@@ -53,7 +54,7 @@ export function createAnthropicProvider(config: {
           error instanceof Anthropic.PermissionDeniedError ||
           error instanceof Anthropic.NotFoundError
         ) {
-          throw new AiUnavailableError(`Anthropic is unavailable: ${error.message}`);
+          throw new AiUnavailableError('Anthropic is unavailable (quota, credentials, or local dev without Workers AI).');
         }
         throw error;
       }
