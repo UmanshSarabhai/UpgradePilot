@@ -1,7 +1,10 @@
 'use client';
 
 import type { AffectedFile, Advisory, DependencyDetail, Finding, FindingOrigin } from '@upgradepilot/shared';
+import { BookOpen, Bug, Layers, RefreshCw, ArrowUpCircle, ShieldAlert, ShieldCheck, Sparkles, Loader2, TriangleAlert } from 'lucide-react';
 import { useState } from 'react';
+import { IconChip, type IconTone } from '@/components/icon-chip';
+import type { LucideIcon } from 'lucide-react';
 import { AnalysisStatusBadge, OriginBadge, RecommendationBadge, RiskBadge, UpgradeTypeBadge } from '@/components/badges';
 import { ErrorState, LoadingRows } from '@/components/states';
 import { Alert, AlertDescription } from '@/components/ui/alert';
@@ -9,6 +12,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Label } from '@/components/ui/label';
+import { Progress } from '@/components/ui/progress';
 import { Separator } from '@/components/ui/separator';
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet';
 import { UNRESOLVED_REASON_LABEL } from '@/lib/format';
@@ -18,10 +22,13 @@ import { SafeLink, isHttpUrl } from '@/components/safe-link';
 const mono = (value: string | null | undefined) =>
   value ? <span className="font-mono">{value}</span> : <span className="text-muted-foreground">-</span>;
 
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
+function Section({ title, icon, tone, children }: { title: string; icon?: LucideIcon; tone?: IconTone; children: React.ReactNode }) {
   return (
     <section className="space-y-2">
-      <h3 className="text-sm font-semibold">{title}</h3>
+      <h3 className="flex items-center gap-2 text-sm font-semibold">
+        {icon && <IconChip icon={icon} tone={tone} size="sm" />}
+        {title}
+      </h3>
       {children}
     </section>
   );
@@ -84,14 +91,14 @@ function AffectedFiles({ files }: { files: AffectedFile[] }) {
 function Advisories({ advisories }: { advisories: Advisory[] | null }) {
   if (advisories === null) {
     return (
-      <Section title="Security advisories">
+      <Section title="Security advisories" icon={ShieldCheck} tone="emerald">
         <p className="text-sm text-muted-foreground">Advisories could not be checked for this package.</p>
       </Section>
     );
   }
   if (advisories.length === 0) return null;
   return (
-    <Section title="Security advisories">
+    <Section title="Security advisories" icon={Bug} tone="amber">
       <ul className="space-y-2 text-sm">
         {advisories.map((a) => (
           <li key={a.id} className="space-y-1 rounded-md border p-2">
@@ -118,7 +125,11 @@ function Reanalyze({ scanId, dependencyId }: { scanId: string; dependencyId: str
   const [force, setForce] = useState(false);
   const mutation = useReanalyze(scanId);
   return (
-    <Section title="Re-analyse">
+    <section className="space-y-3 rounded-xl border bg-muted/30 p-4">
+      <h3 className="flex items-center gap-2 text-sm font-semibold">
+        <IconChip icon={RefreshCw} tone="indigo" size="sm" />
+        Re-analyse
+      </h3>
       <div className="flex flex-wrap items-center gap-4">
         <div className="flex items-center gap-2">
           <Checkbox id="reanalyze-force" checked={force} onCheckedChange={(v) => setForce(v === true)} />
@@ -127,6 +138,7 @@ function Reanalyze({ scanId, dependencyId }: { scanId: string; dependencyId: str
           </Label>
         </div>
         <Button size="sm" variant="outline" disabled={mutation.isPending} onClick={() => mutation.mutate({ dependencyIds: [dependencyId], force })}>
+          {mutation.isPending ? <Loader2 className="animate-spin" aria-hidden /> : <RefreshCw aria-hidden />}
           {mutation.isPending ? 'Queuing...' : 'Re-run analysis'}
         </Button>
       </div>
@@ -140,7 +152,7 @@ function Reanalyze({ scanId, dependencyId }: { scanId: string; dependencyId: str
           Analysis queued. This page will update as the scan runs again.
         </p>
       )}
-    </Section>
+    </section>
   );
 }
 
@@ -152,12 +164,15 @@ function Body({ data, scanId, completed }: { data: DependencyDetail; scanId: str
 
   return (
     <div className="space-y-5">
-      <Section title="Versions">
-        <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
-          <dt className="text-muted-foreground">Declared range</dt>
-          <dd>{mono(dep.declaredRange)}</dd>
-          <dt className="text-muted-foreground">Installed</dt>
-          <dd>
+      <Section title="Versions" icon={Layers} tone="slate">
+        <dl className="grid grid-cols-1 gap-2 text-sm sm:grid-cols-2">
+          <div className="min-w-0 rounded-md border bg-muted/30 px-3 py-2">
+            <dt className="text-xs text-muted-foreground">Declared range</dt>
+            <dd className="break-words">{mono(dep.declaredRange)}</dd>
+          </div>
+          <div className="min-w-0 rounded-md border bg-muted/30 px-3 py-2">
+            <dt className="text-xs text-muted-foreground">Installed</dt>
+            <dd className="break-words">
             {dep.currentVersion ? (
               <>
                 {mono(dep.currentVersion)}
@@ -169,17 +184,27 @@ function Body({ data, scanId, completed }: { data: DependencyDetail; scanId: str
               </span>
             )}
           </dd>
-          <dt className="text-muted-foreground">Latest</dt>
-          <dd>{mono(dep.latestVersion)}</dd>
-          <dt className="text-muted-foreground">Latest in range</dt>
-          <dd>{mono(dep.latestInRangeVersion)}</dd>
-          <dt className="text-muted-foreground">Latest compatible</dt>
-          <dd>{mono(dep.latestCompatibleVersion)}</dd>
-          <dt className="text-muted-foreground">Target</dt>
-          <dd>{mono(dep.targetVersion)}</dd>
+          </div>
+          <div className="min-w-0 rounded-md border bg-muted/30 px-3 py-2">
+            <dt className="text-xs text-muted-foreground">Latest</dt>
+            <dd className="break-words">{mono(dep.latestVersion)}</dd>
+          </div>
+          <div className="min-w-0 rounded-md border bg-muted/30 px-3 py-2">
+            <dt className="text-xs text-muted-foreground">Latest in range</dt>
+            <dd className="break-words">{mono(dep.latestInRangeVersion)}</dd>
+          </div>
+          <div className="min-w-0 rounded-md border bg-muted/30 px-3 py-2">
+            <dt className="text-xs text-muted-foreground">Latest compatible</dt>
+            <dd className="break-words">{mono(dep.latestCompatibleVersion)}</dd>
+          </div>
+          <div className="min-w-0 rounded-md border bg-muted/30 px-3 py-2">
+            <dt className="text-xs text-muted-foreground">Target</dt>
+            <dd className="break-words">{mono(dep.targetVersion)}</dd>
+          </div>
         </dl>
         {dep.isDeprecated && (
           <Alert>
+            <TriangleAlert aria-hidden />
             <AlertDescription>Deprecated{dep.deprecationMessage ? `: ${dep.deprecationMessage}` : '.'}</AlertDescription>
           </Alert>
         )}
@@ -191,7 +216,7 @@ function Body({ data, scanId, completed }: { data: DependencyDetail; scanId: str
       </Section>
 
       {reasons.length > 0 && (
-        <Section title="Why update">
+        <Section title="Why update" icon={ArrowUpCircle} tone="emerald">
           <ul className="space-y-2 text-sm">
             {reasons.map((r, i) => (
               <li key={i} className="space-y-1">
@@ -206,7 +231,7 @@ function Body({ data, scanId, completed }: { data: DependencyDetail; scanId: str
       )}
 
       {factors.length > 0 && (
-        <Section title="What could break">
+        <Section title="What could break" icon={ShieldAlert} tone="red">
           <ul className="space-y-2 text-sm">
             {factors.map((f, i) => (
               <li key={i}>
@@ -221,16 +246,19 @@ function Body({ data, scanId, completed }: { data: DependencyDetail; scanId: str
 
       <Separator />
 
-      <Section title="AI analysis">
+      <Section title="AI analysis" icon={Sparkles} tone="violet">
         {analysis ? (
           <div className="space-y-4">
-            <p className="text-xs text-muted-foreground">
-              <span className="font-mono">
+            <div className="space-y-1.5 text-xs text-muted-foreground">
+              <p className="font-mono">
                 {analysis.provider} / {analysis.model}
-              </span>
-              {' · confidence '}
-              {Math.round(analysis.confidence * 100)}%
-            </p>
+              </p>
+              <div className="flex items-center gap-3">
+                <span>Confidence</span>
+                <Progress value={Math.round(analysis.confidence * 100)} aria-label="AI confidence" className="max-w-40" />
+                <span className="font-mono text-foreground">{Math.round(analysis.confidence * 100)}%</span>
+              </div>
+            </div>
             {analysis.inconclusive && (
               <Alert>
                 <AlertDescription>Inconclusive. The model said the evidence was not enough to judge this upgrade.</AlertDescription>
@@ -249,7 +277,7 @@ function Body({ data, scanId, completed }: { data: DependencyDetail; scanId: str
       </Section>
 
       {evidence.length > 0 && (
-        <Section title="Evidence">
+        <Section title="Evidence" icon={BookOpen} tone="sky">
           <ul className="space-y-3 text-sm">
             {evidence.map((e, i) => (
               <li key={i} className="space-y-1 rounded-md border p-2">

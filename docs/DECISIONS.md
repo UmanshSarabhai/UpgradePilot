@@ -204,3 +204,13 @@ Smaller calls made while building, in order.
 | CSRF | Tokens; Origin check | Origin check on non-GET requests, plus `SameSite=Lax` and the existing JSON-only rule. |
 | Local `next dev` on port 3000 | CORS; APP_ORIGIN | `APP_ORIGIN` sets the redirect URI and the allowed Origin when the dev server proxies to the Worker. Cookies are shared across localhost ports. |
 | Sign-in UI | Separate route; gate in providers | A gate in the providers shows the sign-in screen until `/api/auth/me` succeeds, and any 401 during use returns to it. Built by a subagent in parallel against the shared auth contract. |
+
+### Sign-out fix and UI polish (25 Nov 2026)
+
+| Situation | Options considered | Chosen, and why |
+| --- | --- | --- |
+| Sign-out left an empty dashboard instead of the sign-in page | Patch the cache update; full page load | Reproduced locally first: `queryClient.clear()` detached the auth gate's observer, so it never saw the signed-out state. After a successful sign-out the app now does `window.location.replace('/')`: everything in memory is dropped (safer on shared machines) and the user lands on the sign-in page. The expired-session path (401 during use) still updates in place. |
+| UI direction | Keep neutral; full redesign; restrained colour | Restrained colour: indigo brand (`primary`, `accent`, focus ring), meaning colours only where they carry meaning (red risk, amber review, emerald safe, sky info, violet AI), icons throughout, hover and focus states. Text always states the meaning. |
+| Brand icons | Image files; inline SVG | Inline SVG for Google's "G" and the GitHub mark (`components/brand.tsx`): the CSP allows only same-origin images, and lucide 1.x has no brand icons. |
+| Consistency across four parallel agents | Let each style freely; shared pieces first | Shared pieces first (theme tokens, `BrandMark`, `IconChip`, badges with icons, `EmptyState` icon) plus one design brief given to all four agents (sign-in and header, dashboard, scan page, report and repositories). |
+| Verification | Trust agent reports; look at it | Built and checked every page in the browser with a local test session: sign-in, dashboard, scan page, detail panel, report, and 375px width (no horizontal scroll). |

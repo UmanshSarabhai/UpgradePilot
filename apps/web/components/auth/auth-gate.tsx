@@ -1,5 +1,6 @@
 'use client';
 
+import { Loader2 } from 'lucide-react';
 import { SiteHeader } from '@/components/site-header';
 import { ErrorState } from '@/components/states';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -10,8 +11,14 @@ import { SignInScreen } from './sign-in-screen';
 function Shell({ children, center }: { children: React.ReactNode; center?: boolean }) {
   return (
     <>
-      <SiteHeader />
-      <main className={`mx-auto w-full max-w-6xl flex-1 px-4 py-6 ${center ? 'flex items-start justify-center pt-16 sm:pt-24' : ''}`}>
+      <SiteHeader minimal />
+      <main
+        className={`mx-auto w-full max-w-6xl flex-1 px-4 py-6 ${
+          center
+            ? 'flex items-start justify-center pt-10 sm:pt-20 bg-[radial-gradient(60rem_30rem_at_50%_-10%,var(--color-indigo-50),transparent)]'
+            : ''
+        }`}
+      >
         {children}
       </main>
     </>
@@ -28,10 +35,14 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
   if (me.isPending) {
     return (
       <Shell center>
-        <div className="w-full max-w-sm space-y-3" aria-busy="true" aria-label="Loading">
-          <Skeleton className="h-7 w-40" />
-          <Skeleton className="h-4 w-full" />
-          <Skeleton className="h-9 w-full" />
+        <div className="flex w-full max-w-sm flex-col items-center gap-5 pt-8" role="status" aria-busy="true" aria-label="Loading">
+          <Loader2 className="size-6 animate-spin text-primary" aria-hidden />
+          <p className="text-sm text-muted-foreground">Checking your session</p>
+          <div className="w-full space-y-3">
+            <Skeleton className="h-7 w-40" />
+            <Skeleton className="h-4 w-full" />
+            <Skeleton className="h-9 w-full" />
+          </div>
         </div>
       </Shell>
     );

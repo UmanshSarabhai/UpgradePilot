@@ -8,6 +8,7 @@ import {
   type DependencyListQuery,
   type DependencyRow,
 } from '@upgradepilot/shared';
+import { AlertTriangle, ArrowRight, ChevronLeft, ChevronRight, PackageSearch, Search, SearchX, X } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { RecommendationBadge, RiskBadge, UpgradeTypeBadge } from '@/components/badges';
 import { EmptyState, ErrorState, LoadingRows } from '@/components/states';
@@ -143,18 +144,22 @@ export function DependencyTable({ scanId, active, completed }: { scanId: string;
 
   return (
     <div className="space-y-4">
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-6">
+      <div className="grid grid-cols-1 gap-3 rounded-xl border bg-muted/40 p-3 sm:grid-cols-2 lg:grid-cols-6">
         <div className="space-y-1 sm:col-span-2">
           <Label htmlFor="dep-search" className="text-xs text-muted-foreground">
             Search packages
           </Label>
-          <Input
-            id="dep-search"
-            type="search"
-            placeholder="Package name"
-            value={filters.q}
-            onChange={(e) => setFilters((f) => ({ ...f, q: e.target.value }))}
-          />
+          <div className="relative">
+            <Search className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" aria-hidden />
+            <Input
+              id="dep-search"
+              type="search"
+              placeholder="Package name"
+              className="pl-8"
+              value={filters.q}
+              onChange={(e) => setFilters((f) => ({ ...f, q: e.target.value }))}
+            />
+          </div>
         </div>
         <FilterSelect
           label="Upgrade type"
@@ -186,6 +191,14 @@ export function DependencyTable({ scanId, active, completed }: { scanId: string;
           onChange={(v) => update({ sort: v as Filters['sort'] })}
           options={SORT_OPTIONS}
         />
+        {filtered && (
+          <div className="flex justify-end sm:col-span-2 lg:col-span-6">
+            <Button variant="ghost" size="sm" onClick={clear}>
+              <X aria-hidden />
+              Clear filters
+            </Button>
+          </div>
+        )}
       </div>
 
       {list.isPending ? (
@@ -195,15 +208,18 @@ export function DependencyTable({ scanId, active, completed }: { scanId: string;
       ) : list.data.items.length === 0 ? (
         filtered ? (
           <EmptyState
+            icon={SearchX}
             title="No dependencies match these filters"
             action={
               <Button variant="outline" size="sm" onClick={clear}>
+                <X aria-hidden />
                 Clear filters
               </Button>
             }
           />
         ) : (
           <EmptyState
+            icon={PackageSearch}
             title={active ? 'No dependencies yet' : 'No dependencies found'}
             description={active ? 'Rows appear here as the scan discovers them.' : 'This scan did not find any npm dependencies.'}
           />
@@ -220,6 +236,9 @@ export function DependencyTable({ scanId, active, completed }: { scanId: string;
                   <TableHead>Upgrade</TableHead>
                   <TableHead>Risk</TableHead>
                   <TableHead>Recommendation</TableHead>
+                  <TableHead className="w-8">
+                    <span className="sr-only">Open details</span>
+                  </TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -229,7 +248,7 @@ export function DependencyTable({ scanId, active, completed }: { scanId: string;
                     tabIndex={0}
                     role="button"
                     aria-label={`Open details for ${row.name}`}
-                    className="cursor-pointer focus-visible:bg-muted focus-visible:outline-none"
+                    className="group cursor-pointer transition-colors hover:bg-muted/50 focus-visible:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/50"
                     onClick={() => setSelectedId(row.id)}
                     onKeyDown={(event) => {
                       if (event.key === 'Enter' || event.key === ' ') {
@@ -242,10 +261,13 @@ export function DependencyTable({ scanId, active, completed }: { scanId: string;
                       <div className="flex items-center gap-2">
                         <span className="font-medium">{row.name}</span>
                         {row.isDeprecated && (
-                          <span className="rounded border border-amber-200 bg-amber-50 px-1 text-xs text-amber-800">deprecated</span>
+                          <span className="inline-flex items-center gap-1 rounded border border-amber-200 bg-amber-50 px-1.5 text-xs text-amber-800">
+                            <AlertTriangle className="size-3" aria-hidden />
+                            deprecated
+                          </span>
                         )}
                       </div>
-                      <div className="text-xs text-muted-foreground">
+                      <div className="font-mono text-xs text-muted-foreground">
                         {row.manifestPath}
                         {row.registryName && row.registryName !== row.name && (
                           <>
@@ -258,7 +280,12 @@ export function DependencyTable({ scanId, active, completed }: { scanId: string;
                     <TableCell>
                       <CurrentVersion row={row} />
                     </TableCell>
-                    <TableCell className="font-mono">{row.latestVersion ?? <span className="text-muted-foreground">-</span>}</TableCell>
+                    <TableCell className="font-mono">
+                      <span className="inline-flex items-center gap-2">
+                        <ArrowRight className="hidden size-3.5 text-muted-foreground md:inline" aria-hidden />
+                        {row.latestVersion ?? <span className="text-muted-foreground">-</span>}
+                      </span>
+                    </TableCell>
                     <TableCell>
                       <UpgradeTypeBadge type={row.upgradeType} />
                     </TableCell>
@@ -267,6 +294,12 @@ export function DependencyTable({ scanId, active, completed }: { scanId: string;
                     </TableCell>
                     <TableCell>
                       <RecommendationBadge recommendation={row.recommendation} />
+                    </TableCell>
+                    <TableCell>
+                      <ChevronRight
+                        className="size-4 text-muted-foreground transition-transform group-hover:translate-x-0.5 group-hover:text-foreground"
+                        aria-hidden
+                      />
                     </TableCell>
                   </TableRow>
                 ))}
@@ -280,10 +313,12 @@ export function DependencyTable({ scanId, active, completed }: { scanId: string;
             </p>
             <div className="flex gap-2">
               <Button variant="outline" size="sm" disabled={page <= 1} onClick={() => setPage((p) => p - 1)}>
+                <ChevronLeft aria-hidden />
                 Previous
               </Button>
               <Button variant="outline" size="sm" disabled={page >= pageCount} onClick={() => setPage((p) => p + 1)}>
                 Next
+                <ChevronRight aria-hidden />
               </Button>
             </div>
           </div>

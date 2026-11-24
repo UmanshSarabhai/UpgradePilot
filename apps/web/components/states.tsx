@@ -1,4 +1,4 @@
-import { AlertCircle, Inbox } from 'lucide-react';
+import { AlertCircle, Inbox, type LucideIcon } from 'lucide-react';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -14,10 +14,22 @@ export function LoadingRows({ rows = 5 }: { rows?: number }) {
   );
 }
 
-export function EmptyState({ title, description, action }: { title: string; description?: string; action?: React.ReactNode }) {
+export function EmptyState({
+  title,
+  description,
+  action,
+  icon: Icon = Inbox,
+}: {
+  title: string;
+  description?: string;
+  action?: React.ReactNode;
+  icon?: LucideIcon;
+}) {
   return (
-    <div className="flex flex-col items-center justify-center gap-2 rounded-lg border border-dashed px-6 py-12 text-center">
-      <Inbox className="size-6 text-muted-foreground" aria-hidden />
+    <div className="flex flex-col items-center justify-center gap-2 rounded-xl border border-dashed bg-background/60 px-6 py-12 text-center">
+      <span className="mb-1 flex size-10 items-center justify-center rounded-full bg-indigo-50 text-indigo-500 ring-1 ring-inset ring-indigo-100">
+        <Icon className="size-5" aria-hidden />
+      </span>
       <p className="font-medium">{title}</p>
       {description && <p className="max-w-md text-sm text-muted-foreground">{description}</p>}
       {action}

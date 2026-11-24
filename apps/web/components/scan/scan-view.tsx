@@ -1,5 +1,6 @@
 'use client';
 
+import { ArrowLeft, FileText, List, ScanSearch } from 'lucide-react';
 import Link from 'next/link';
 import { useState } from 'react';
 import { useSearchParams } from 'next/navigation';
@@ -16,7 +17,10 @@ import { CompletedSummary, DiscoverySummary } from './scan-summary';
 function BackToDashboard() {
   return (
     <Button asChild variant="outline" size="sm">
-      <Link href="/">Back to dashboard</Link>
+      <Link href="/">
+        <ArrowLeft aria-hidden />
+        Back to dashboard
+      </Link>
     </Button>
   );
 }
@@ -27,12 +31,12 @@ export function ScanView() {
   const [tab, setTab] = useState('dependencies');
 
   if (!id) {
-    return <EmptyState title="No scan selected" description="Open a scan from the dashboard." action={<BackToDashboard />} />;
+    return <EmptyState icon={ScanSearch} title="No scan selected" description="Open a scan from the dashboard." action={<BackToDashboard />} />;
   }
   if (scan.isPending) return <LoadingRows rows={6} />;
   if (scan.isError) {
     if (scan.error instanceof ApiError && scan.error.status === 404) {
-      return <EmptyState title="Scan not found" description="It may have been removed, or the link is wrong." action={<BackToDashboard />} />;
+      return <EmptyState icon={ScanSearch} title="Scan not found" description="It may have been removed, or the link is wrong." action={<BackToDashboard />} />;
     }
     return <ErrorState error={scan.error} onRetry={() => void scan.refetch()} />;
   }
@@ -49,8 +53,12 @@ export function ScanView() {
 
       <Tabs value={completed ? tab : 'dependencies'} onValueChange={setTab}>
         <TabsList>
-          <TabsTrigger value="dependencies">Dependencies</TabsTrigger>
+          <TabsTrigger value="dependencies">
+            <List aria-hidden />
+            Dependencies
+          </TabsTrigger>
           <TabsTrigger value="report" disabled={!completed}>
+            <FileText aria-hidden />
             Report
           </TabsTrigger>
         </TabsList>

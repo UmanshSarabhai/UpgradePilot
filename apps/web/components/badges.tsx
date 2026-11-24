@@ -1,4 +1,19 @@
 import type { AnalysisStatus, FindingOrigin, Recommendation, RiskLevel, ScanStatus, UpgradeType } from '@upgradepilot/shared';
+import {
+  AlertTriangle,
+  ArrowUpCircle,
+  CheckCircle2,
+  CircleHelp,
+  Clock,
+  Loader2,
+  type LucideIcon,
+  Scale,
+  Search,
+  ShieldAlert,
+  ShieldCheck,
+  Sparkles,
+  XCircle,
+} from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { SCAN_STATUS_LABEL } from '@/lib/format';
 import { cn } from '@/lib/utils';
@@ -13,9 +28,22 @@ const tone = {
   gray: 'bg-muted text-muted-foreground border-border',
 } as const;
 
-function ToneBadge({ color, children, className }: { color: keyof typeof tone; children: React.ReactNode; className?: string }) {
+function ToneBadge({
+  color,
+  icon: Icon,
+  spin,
+  children,
+  className,
+}: {
+  color: keyof typeof tone;
+  icon?: LucideIcon;
+  spin?: boolean;
+  children: React.ReactNode;
+  className?: string;
+}) {
   return (
     <Badge variant="outline" className={cn('font-medium', tone[color], className)}>
+      {Icon && <Icon className={cn(spin && 'animate-spin')} aria-hidden />}
       {children}
     </Badge>
   );
@@ -30,25 +58,56 @@ export function UpgradeTypeBadge({ type }: { type: UpgradeType | null }) {
 export function RiskBadge({ level }: { level: RiskLevel | null }) {
   if (!level) return <span className="text-muted-foreground">-</span>;
   const color = { high: 'red', medium: 'amber', low: 'green', unknown: 'gray' } as const;
-  return <ToneBadge color={color[level]}>{level} risk</ToneBadge>;
+  const icon = { high: ShieldAlert, medium: AlertTriangle, low: ShieldCheck, unknown: CircleHelp } as const;
+  return (
+    <ToneBadge color={color[level]} icon={icon[level]}>
+      {level} risk
+    </ToneBadge>
+  );
 }
 
 export function RecommendationBadge({ recommendation }: { recommendation: Recommendation | null }) {
   if (!recommendation) return <span className="text-muted-foreground">-</span>;
   const color = { upgrade: 'green', investigate: 'amber', defer: 'gray' } as const;
-  return <ToneBadge color={color[recommendation]}>{recommendation}</ToneBadge>;
+  const icon = { upgrade: ArrowUpCircle, investigate: Search, defer: Clock } as const;
+  return (
+    <ToneBadge color={color[recommendation]} icon={icon[recommendation]}>
+      {recommendation}
+    </ToneBadge>
+  );
 }
 
 export function ScanStatusBadge({ status }: { status: ScanStatus }) {
   const color = status === 'COMPLETED' ? 'green' : status === 'FAILED' ? 'red' : 'blue';
-  return <ToneBadge color={color}>{SCAN_STATUS_LABEL[status]}</ToneBadge>;
+  const icon = status === 'COMPLETED' ? CheckCircle2 : status === 'FAILED' ? XCircle : Loader2;
+  return (
+    <ToneBadge color={color} icon={icon} spin={status !== 'COMPLETED' && status !== 'FAILED'}>
+      {SCAN_STATUS_LABEL[status]}
+    </ToneBadge>
+  );
 }
 
 /** Marks where a finding came from: rule-based, AI with a cited source, or an AI claim we could not verify. */
 export function OriginBadge({ origin }: { origin: FindingOrigin }) {
-  if (origin === 'deterministic') return <ToneBadge color="gray">rule</ToneBadge>;
-  if (origin === 'ai') return <ToneBadge color="violet">AI</ToneBadge>;
-  return <ToneBadge color="amber">unverified AI claim</ToneBadge>;
+  if (origin === 'deterministic') {
+    return (
+      <ToneBadge color="gray" icon={Scale}>
+        rule
+      </ToneBadge>
+    );
+  }
+  if (origin === 'ai') {
+    return (
+      <ToneBadge color="violet" icon={Sparkles}>
+        AI
+      </ToneBadge>
+    );
+  }
+  return (
+    <ToneBadge color="amber" icon={AlertTriangle}>
+      unverified AI claim
+    </ToneBadge>
+  );
 }
 
 export function AnalysisStatusBadge({ status }: { status: AnalysisStatus | null }) {
@@ -63,5 +122,9 @@ export function AnalysisStatusBadge({ status }: { status: AnalysisStatus | null 
     failed: 'AI failed',
   };
   const color = status === 'completed' ? 'violet' : status === 'failed' ? 'red' : 'gray';
-  return <ToneBadge color={color}>{label[status]}</ToneBadge>;
+  return (
+    <ToneBadge color={color} icon={Sparkles}>
+      {label[status]}
+    </ToneBadge>
+  );
 }

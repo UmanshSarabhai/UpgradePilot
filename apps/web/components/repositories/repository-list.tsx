@@ -1,13 +1,17 @@
 'use client';
 
+import { FolderGit2 } from 'lucide-react';
 import Link from 'next/link';
 import { useState } from 'react';
+import { GitHubIcon } from '@/components/brand';
 import { ScanStatusBadge } from '@/components/badges';
 import { EmptyState, ErrorState, LoadingRows } from '@/components/states';
 import { Button } from '@/components/ui/button';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { formatRelative } from '@/lib/format';
+import { cn } from '@/lib/utils';
 import { useRepositories } from '@/lib/queries';
+import { LanguageDot } from './language-dot';
 import { Pagination } from './pagination';
 
 export function RepositoryList() {
@@ -19,6 +23,7 @@ export function RepositoryList() {
   if (data.items.length === 0 && page === 1) {
     return (
       <EmptyState
+        icon={FolderGit2}
         title="No repositories yet"
         description="Scan a public GitHub repository from the dashboard to see it here."
         action={
@@ -45,13 +50,16 @@ export function RepositoryList() {
         </TableHeader>
         <TableBody>
           {data.items.map((repo) => (
-            <TableRow key={repo.id}>
+            <TableRow key={repo.id} className="hover:bg-muted/50">
               <TableCell>
-                <Link href={`/repository/?id=${encodeURIComponent(repo.id)}`} className="font-medium text-primary underline-offset-4 hover:underline">
+                <Link href={`/repository/?id=${encodeURIComponent(repo.id)}`} className="inline-flex items-center gap-2 rounded-sm font-medium text-primary underline-offset-4 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring">
+                  <GitHubIcon className="text-muted-foreground" />
                   {repo.owner}/{repo.name}
                 </Link>
               </TableCell>
-              <TableCell>{repo.primaryLanguage ?? '-'}</TableCell>
+              <TableCell>
+                <LanguageDot language={repo.primaryLanguage} />
+              </TableCell>
               <TableCell className="text-right">{repo.scanCount}</TableCell>
               <TableCell>
                 {repo.lastScan ? (
@@ -63,8 +71,12 @@ export function RepositoryList() {
                   '-'
                 )}
               </TableCell>
-              <TableCell className="text-right">{repo.lastScan ? repo.lastScan.totals.outdated : '-'}</TableCell>
-              <TableCell className="text-right">{repo.lastScan ? repo.lastScan.totals.highRisk : '-'}</TableCell>
+              <TableCell className={cn('text-right tabular-nums', repo.lastScan && repo.lastScan.totals.outdated > 0 && 'font-medium text-amber-700')}>
+                {repo.lastScan ? repo.lastScan.totals.outdated : '-'}
+              </TableCell>
+              <TableCell className={cn('text-right tabular-nums', repo.lastScan && repo.lastScan.totals.highRisk > 0 && 'font-medium text-red-700')}>
+                {repo.lastScan ? repo.lastScan.totals.highRisk : '-'}
+              </TableCell>
             </TableRow>
           ))}
         </TableBody>

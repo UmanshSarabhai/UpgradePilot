@@ -39,9 +39,11 @@ export function useLogout() {
       }
       if (!response.ok) throw new ApiError(response.status, 'UNKNOWN', `Sign out failed with status ${response.status}.`);
     },
+    // A full page load to the root drops every cached query and lands on the sign-in screen. Clearing the
+    // cache in place is not enough: `clear()` detaches the gate's observer, so it kept showing the app.
     onSuccess: () => {
-      queryClient.clear();
       queryClient.setQueryData(ME_KEY, null);
+      window.location.replace('/');
     },
   });
 }
