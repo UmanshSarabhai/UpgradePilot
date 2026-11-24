@@ -49,3 +49,31 @@ export const DiscoveredDependencySchema = z.object({
   unresolvedReason: UnresolvedReasonSchema.nullable(),
 });
 export type DiscoveredDependency = z.infer<typeof DiscoveredDependencySchema>;
+
+export const UpgradeTypeSchema = z.enum(['patch', 'minor', 'major', 'up_to_date', 'unresolved']);
+export type UpgradeType = z.infer<typeof UpgradeTypeSchema>;
+
+export const RiskLevelSchema = z.enum(['low', 'medium', 'high', 'unknown']);
+export type RiskLevel = z.infer<typeof RiskLevelSchema>;
+
+/** Why registry data is missing or partial. Only PACKAGE_NOT_FOUND and REGISTRY_UNAVAILABLE stop resolution. */
+export const RegistryErrorSchema = z.enum([
+  'PACKAGE_NOT_FOUND',
+  'VERSION_NOT_FOUND',
+  'NO_STABLE_RELEASE',
+  'VERSION_LIST_TOO_LARGE',
+  'REGISTRY_UNAVAILABLE',
+]);
+export type RegistryError = z.infer<typeof RegistryErrorSchema>;
+
+export const ReleaseSourceTypeSchema = z.enum([
+  'npm_metadata',
+  'github_release',
+  'changelog',
+  'migration_guide',
+  'documentation',
+]);
+export type ReleaseSourceType = z.infer<typeof ReleaseSourceTypeSchema>;
+
+export const RetrievalStatusSchema = z.enum(['ok', 'not_found', 'failed', 'too_large', 'skipped']);
+export type RetrievalStatus = z.infer<typeof RetrievalStatusSchema>;

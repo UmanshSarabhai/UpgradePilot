@@ -15,7 +15,8 @@ The app runs on the Cloudflare Workers Free plan only. These limits come from th
 | D1 queries per invocation | 50 (a `batch()` counts as one) | Writes are batched. |
 | Requests per day | 100,000 | Plenty for a personal tool. |
 | Queues | 10,000 operations/day, 24 h retention | One message per scan step. A 200-package scan uses roughly 100 operations. |
-| KV writes | 1,000/day | KV holds only AI results. HTTP responses go to the Cache API, which has no daily write cap. |
+| KV writes | 1,000/day | KV holds only AI results. The npm cache lives in D1 (100,000 row writes/day). |
+| D1 rows | 5M read, 100k written per day | Comfortable. A 200-package scan writes roughly 1,500 rows including evidence. |
 | Workers AI | 10,000 neurons/day | AI runs only for upgrades with evidence, and results are cached by input hash. |
 | Static assets | Free and unlimited | The frontend is a static export served by the same Worker. |
 
@@ -31,7 +32,6 @@ flowchart LR
   Q --> RUN["Scan step runner<br/>(Worker queue handler)"]
   CRON["Cron sweep<br/>(every 5 min)"] -->|re-enqueue stalled scans| Q
   RUN --> D1
-  RUN --> CACHE[(Cache API)]
   RUN --> KV[(KV: AI results)]
   RUN --> GH[GitHub REST + raw]
   RUN --> NPM[npm registry]
@@ -77,7 +77,7 @@ Modules hold business logic and take their dependencies as arguments (an `HttpCl
 | AIAnalysisModule | Provider interface (Workers AI, Anthropic, OpenAI), prompt building with untrusted-content fencing, Zod validation, input-hash cache | 3 |
 | ReportModule | Combine deterministic and AI results into groups, an ordered plan, Markdown and JSON | 3 |
 | ScanOrchestrationModule | State machine, checkpoints, leases, step scheduling, retry and recovery | 2 |
-| StorageModule | D1 repositories (typed queries, batched writes), KV and Cache API wrappers | 1 (schema), 2 (code) |
+| StorageModule | D1 queries for scans, dependencies and evidence (batched, idempotent writes), D1-backed npm cache | 1 (schema), 2 (code) |
 
 ## Scan data flow
 
@@ -99,12 +99,16 @@ stateDiagram-v2
   ANALYZING_UPGRADES --> FAILED
 ```
 
-1. `POST /api/scans` validates input, upserts the repository, and inserts a `PENDING` scan. An idempotency key and a partial unique index (one active scan per repo and branch) block duplicates. It enqueues the first step and returns the scan ID.
-2. Each queue message says "advance scan X". The runner takes a short lease on the scan row (conditional `UPDATE`), does one bounded unit of work, writes results and the new checkpoint in one D1 batch, releases the lease, and enqueues the next step.
-3. A unit of work is one stage transition or one batch (about 8 packages) inside a long stage. The batch size keeps each step under 50 subrequests.
-4. Upstream rate limits re-enqueue the step with a delay instead of failing. Other errors retry with backoff up to a cap, then mark the scan `FAILED` with the message.
-5. A cron sweep every 5 minutes re-enqueues scans whose lease has expired and are not finished. That covers lost messages and crashed steps.
-6. The UI polls `GET /api/scans/:id` for status and progress.
+1. `POST /api/scans` checks the repository and branch exist (404 otherwise), upserts the repository, and inserts a `PENDING` scan. An `Idempotency-Key` header and a partial unique index (one active scan per repository and branch) block duplicates. It enqueues `{ scanId, step: 0 }` and returns the scan ID.
+2. Each queue message says "advance scan X from step N". The runner leases the scan row with a conditional `UPDATE` (right step, unfinished, no live lease), runs the handler for the current status, then commits the stage's writes and the next state in one D1 batch, and enqueues step N+1.
+3. The status names the work in progress. Every committed step increments `step_seq`. A message carrying an old step number is dropped, so a duplicate or recovered message cannot start a second chain.
+4. Long stages are resumable from the data, not from a cursor. Rows with `upgrade_type IS NULL` still need version resolution. Upgrades without `release_sources` rows still need evidence. A crashed or repeated step picks up whatever is still pending, and every write is idempotent (delete-then-insert or update by ID).
+5. Batches: 4 packages per resolution step, 3 upgrades per release-note step. That keeps each step under 50 subrequests and 50 D1 queries.
+6. Rate limits release the lease without spending an attempt and re-enqueue with the upstream's delay (30 s to 1 h). `AppError`s (branch deleted, repository went private) fail the scan at once. Other errors back off (15 s, 30 s, 60 s) and fail the scan after 4 attempts.
+7. A cron sweep every 5 minutes re-enqueues unfinished scans with no live lease, no scheduled retry, and no progress for 3 minutes. It also deletes expired cache rows.
+8. The UI polls `GET /api/scans/:id` for status and progress.
+
+Phase 2 leaves `ANALYZING_UPGRADES` and `GENERATING_REPORT` as pass-through steps. They are filled in Phase 3.
 
 AI is optional at step `ANALYZING_UPGRADES`. If no provider is configured or the budget is spent, the step records "AI unavailable" and the report uses deterministic results only.
 
@@ -120,6 +124,9 @@ AI is optional at step `ANALYZING_UPGRADES`. If no provider is configured or the
 
 - **CPU on large repos.** The recursive tree listing for a big monorepo is several MB of JSON. TanStack/query took 25 subrequests and parsed fine in Node, but we have not measured it against the 10 ms Free limit in production. If it fails there, the fallback is to list only the workspace folders through the Contents API instead of the whole tree.
 - **Lockfile size.** Lockfiles over 10 MB are skipped, and their dependencies are marked `LOCKFILE_UNREADABLE`.
+- **D1 query budget per step.** A resolution step can use up to about 45 of the 50 D1 queries when every cache lookup misses and writes back. A package installed at many different versions across manifests adds 2 queries per extra version. If deploys show "too many queries", lower `RESOLVE_BATCH` in `stages.ts`.
+- **GitHub API quota without a token.** Each upgrade with a GitHub repository costs one `releases` API call. Unauthenticated, that is 60 an hour, shared with repository lookups. Large scans wait out the limit (the runner reschedules) unless `GITHUB_TOKEN` is set.
+- **Cache API on workers.dev.** The docs do not confirm the Cache API works on `*.workers.dev`, so it is not used. If the app moves to a custom domain, raw GitHub files could be cached there.
 
 ## API
 
@@ -155,10 +162,29 @@ Defined in `apps/api/migrations/0001_initial.sql`. Main points:
 
 | What | Where | Key | TTL |
 | --- | --- | --- | --- |
-| npm package metadata | Cache API | registry URL | 1 hour |
-| GitHub file contents by commit SHA | Cache API | raw URL (immutable) | 1 day |
-| GitHub repo metadata, branches | Cache API | API URL | 5 minutes |
-| AI analysis | KV | SHA-256 of (model, prompt version, package, versions, evidence hashes) | 30 days |
+| npm dist-tags (and "package not found") | D1 `registry_cache` | `npm:dist-tags:<name>` | 1 hour |
+| One version's manifest (reduced) | D1 `registry_cache` | `npm:version:<name>@<version>` | 7 days (immutable) |
+| Full version list (or a "too large" marker) | D1 `registry_cache` | `npm:versions:<name>` | 1 hour |
+| AI analysis (Phase 3) | KV | SHA-256 of (model, prompt version, package, versions, evidence hashes) | 30 days |
+
+GitHub responses are not cached. One scan reads each file once, and evidence is stored per scan in `release_sources`.
+
+## Version resolution rules (Phase 2)
+
+- Small npm endpoints first: `dist-tags` (about 100 bytes) and one version's manifest (about 3 KB). The full version list is 8.8 MB for `typescript` and 25.7 MB for `next`, too much to parse in 10 ms. It is fetched only when the dist-tags cannot answer, capped at 5 MB. Above the cap the field stays empty with `VERSION_LIST_TOO_LARGE`.
+- **Latest**: npm's `latest` dist-tag when it is a stable version, otherwise the highest stable version. Prereleases are excluded throughout.
+- **Latest in range**: the highest stable version that satisfies the declared range (`dist-tags[tag]` for tag specs).
+- **Latest compatible**: the highest stable version that satisfies `^installed`, the newest non-breaking upgrade.
+- **Upgrade type**: `semver.diff(installed, latest)` mapped to patch, minor or major. `up_to_date` when installed is at or above latest. `unresolved` when the installed version is unknown, even though latest and in-range are still filled in.
+- **Deprecated**: the latest version's deprecation (the whole package) wins over the installed version's.
+- Engines, peer dependencies, deprecation and repository for the current and target versions go in `registry_facts` for Phase 3's risk rules.
+
+## Release evidence rules (Phase 2)
+
+- Repository from the target version's npm manifest. GitHub only. Anything else is recorded as `skipped`.
+- Sources: GitHub releases in `(current, target]` (first page of 100, monorepo tags like `pkg@1.2.3` matched by package name), the matching `CHANGELOG.md` sections (package folder, then root), and `MIGRATION.md` or `UPGRADING.md` for major upgrades. One `npm_metadata` item records the engines, peers and deprecation of both versions.
+- Every source gets a row with its URL and status (`ok`, `not_found`, `failed`, `too_large`, `skipped`), even when nothing was found.
+- Excerpt budget: 16,000 characters per upgrade, 6,000 per item. Priority order: migration guide, changelog, major releases (`x.0.0`), then other releases newest first. Items over budget keep their URL and hash but have no excerpt.
 
 ## Security
 

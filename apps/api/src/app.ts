@@ -7,6 +7,7 @@ import { AppError, UpstreamError } from './lib/errors';
 import { createLogger } from './lib/logger';
 import { healthRoutes } from './routes/health';
 import { repositoryRoutes } from './routes/repositories';
+import { scanRoutes } from './routes/scans';
 
 const MAX_BODY_BYTES = 16 * 1024;
 
@@ -14,7 +15,12 @@ function errorBody(code: ErrorResponse['error']['code'], message: string, reques
   return { error: { code, message, requestId, ...(details === undefined ? {} : { details }) } };
 }
 
-export function createApp() {
+export interface AppOptions {
+  /** Replaces global fetch for GitHub and npm calls. For tests. */
+  fetch?: typeof fetch;
+}
+
+export function createApp(options: AppOptions = {}) {
   const app = new Hono<AppEnv>();
 
   app.use('*', async (c, next) => {
@@ -22,6 +28,7 @@ export function createApp() {
     const logger = createLogger(c.env.LOG_LEVEL, { requestId });
     c.set('requestId', requestId);
     c.set('logger', logger);
+    c.set('fetchImpl', options.fetch);
     const started = Date.now();
     await next();
     logger.info('request', { method: c.req.method, path: c.req.path, status: c.res.status, durationMs: Date.now() - started });
@@ -37,6 +44,7 @@ export function createApp() {
 
   app.route('/api', healthRoutes);
   app.route('/api', repositoryRoutes);
+  app.route('/api', scanRoutes);
 
   app.notFound((c) => c.json(errorBody('NOT_FOUND', 'Route not found.', c.get('requestId')), 404));
 

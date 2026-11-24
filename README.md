@@ -4,7 +4,7 @@ UpgradePilot analyses the npm dependencies of a public GitHub repository and pro
 
 It runs entirely on the Cloudflare Workers Free plan: Workers, D1, Queues, KV, Workers AI and static assets.
 
-> Status: Phase 1 of 5. Repository inspection and dependency discovery work. Version resolution, AI analysis, reports and the dashboard are not built yet. See the [implementation plan](docs/ARCHITECTURE.md#implementation-plan).
+> Status: Phase 2 of 5. Scans run end to end: discovery, npm version resolution, upgrade classification and release-note collection, as queued, resumable steps. AI analysis, risk rules, reports and the dashboard are not built yet. See the [implementation plan](docs/ARCHITECTURE.md#implementation-plan).
 
 ## Docs
 
@@ -58,12 +58,23 @@ npm test
 npm run typecheck
 ```
 
-## API (Phase 1)
+## API (Phase 2)
 
 | Method and path | Purpose |
 | --- | --- |
 | `GET /api/health` | App and D1 health |
 | `POST /api/repositories/inspect` | Validate a GitHub URL, return repository metadata and branches |
+| `POST /api/scans` | Start a scan (`{ "url", "branch" }`, optional `Idempotency-Key` header). Returns 201, or 200 with `reused: true` for a duplicate |
+| `GET /api/scans/:scanId` | Status, progress, stage and discovery summary |
+| `GET /api/scans/:scanId/dependencies` | Paginated list. Filters: `upgradeType`, `dependencyType`, `riskLevel`, `q`. `sort=name\|upgradeType`, `page`, `pageSize` (max 100) |
+
+Try a scan locally:
+
+```bash
+curl -X POST http://localhost:8787/api/scans -H 'content-type: application/json' -d '{"url":"https://github.com/expressjs/express","branch":"master"}'
+```
+
+Then poll `GET /api/scans/<scanId>`. `wrangler dev` runs the queue consumer locally. To trigger the recovery sweep by hand, start the dev server with `--test-scheduled` and open `http://localhost:8787/__scheduled`.
 
 Errors always look like `{ "error": { "code", "message", "details?", "requestId" } }`.
 
@@ -80,6 +91,10 @@ npx wrangler d1 create upgradepilot
 ```
 
 Copy the printed `database_id` into `apps/api/wrangler.jsonc`, then:
+
+```bash
+npx wrangler queues create upgradepilot-scans
+```
 
 ```bash
 npm run db:migrate:remote -w @upgradepilot/api

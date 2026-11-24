@@ -57,13 +57,13 @@ Each entry gives the decision, the reason, and what we gave up. Newest last.
 
 **Trade-off.** A real package outside the declared workspaces is missed. The report lists the skipped paths so nothing is hidden.
 
-## ADR-007: Caching split between the Cache API and KV
+## ADR-007: npm cache in D1, AI results in KV (revised in Phase 2)
 
-**Decision.** HTTP responses (npm metadata, GitHub files and metadata) go to the Cache API. KV holds only AI results, keyed by a hash of the full AI input.
+**Decision.** Reduced npm data (dist-tags, one version's manifest, version lists) goes in a D1 table, `registry_cache`, with an expiry column. KV holds only AI results, keyed by a hash of the full AI input. GitHub responses are not cached.
 
-**Why.** KV on Free allows 1,000 writes a day. One scan can touch hundreds of packages, so caching registry data in KV would hit that limit. The Cache API has no daily cap and suits HTTP responses. AI results are few, expensive and worth keeping across data centres, which suits KV.
+**Why.** The first version of this ADR put HTTP responses in the Cache API. The Cloudflare docs promise working cache operations only on custom domains and Pages, and a free deploy lives on `*.workers.dev`. KV allows only 1,000 writes a day. D1 allows 100,000 row writes a day and is already bound. Storing reduced JSON instead of raw bodies also saves the parse CPU on a hit.
 
-**Trade-off.** The Cache API is per data centre, so a cold location refetches. That is fine for a personal tool.
+**Trade-off.** Each cache read or write is a D1 query, and those count toward the 50-per-invocation limit. Batch sizes account for it.
 
 ## ADR-008: Deterministic risk is the floor, AI can only raise it with evidence
 
@@ -116,3 +116,20 @@ Smaller calls made while building, in order.
 | Live run: `@types/react` installed at 19.3.0 against a declared `^18` because of pnpm `overrides` | Mark unresolved (`LOCKFILE_OUT_OF_SYNC`), or trust the lockfile | Trust the lockfile and remove the reason code. It is what installs. Phase 2 flags "outside declared range" from stored data. ADR-005 updated. |
 | Frontend in Phase 1 | Scaffold Next.js now, or in Phase 4 | Phase 4. Nothing exists to display until scans run, and an empty scaffold would go stale. |
 | KV and Queue bindings in `wrangler.jsonc` | Add now, or add with the code that uses them | Add with the code (Phase 2). Unused bindings need real IDs before deploy for no benefit. |
+
+### Phase 2 (24 Nov 2026)
+
+| Situation | Options considered | Chosen, and why |
+| --- | --- | --- |
+| npm full version lists are 8.8 MB (`typescript`) to 25.7 MB (`next`), too much for 10 ms of CPU | Always fetch the list; use a third-party version API; small endpoints first | Small npm endpoints first (`dist-tags` plus one version manifest). The list is fetched only when needed, capped at 5 MB, and marked `VERSION_LIST_TOO_LARGE` above that. Stays on npm as the spec requires. |
+| The Cache API is not confirmed to work on `*.workers.dev` | Cache API anyway, KV, or D1 | D1 table `registry_cache` (ADR-007 revised). |
+| Publish timestamps | Fetch full packuments for `time` | Not collected. Neither the abbreviated packument nor the per-version manifest has `time`, and the full packument is too large. GitHub releases are the dated source. |
+| Resuming long stages | Cursor in `scans.checkpoint`, or pending state in the rows | Pending state in the rows (`upgrade_type IS NULL`, no `release_sources`). Simpler and idempotent. The `checkpoint` column is unused for now. |
+| Duplicate queue messages and recovery | Lease only; lease plus a step number | Lease plus `step_seq` fencing (migration 0002). A lease alone lets two chains alternate forever. |
+| Where `FETCHING_REPOSITORY` does its work | Inside `POST /api/scans`, or as its own step | Both. `POST` checks the repository and branch for a fast 404. The step pins the commit SHA, so the scan reads one consistent snapshot. |
+| A package's registry call keeps failing (timeouts or 5xx after retries) | Fail the scan, or mark the package | Mark that package `REGISTRY_UNAVAILABLE` and keep going. Rate limits still pause the whole scan. |
+| `ANALYZING_UPGRADES` and `GENERATING_REPORT` before Phase 3 | Stop at `COLLECTING_RELEASE_NOTES`, or pass through | Pass through to `COMPLETED`, with the stage text saying analysis is not built yet. Scans finish and the API is usable now. |
+| Testing SQL | In-memory fake store (ADR-011's plan), or real D1 | Real local D1 through Wrangler's `getPlatformProxy`. No fake to maintain, and the real SQL gets tested. GitHub and npm are faked at `fetch` through a new `createApp({ fetch })` option. |
+| Two subagents built version resolution and release notes in parallel | Shared files, or fixed contracts first | Contract files (`versions/types.ts`, `release-notes/types.ts`, `lib/cache.ts`, shared enums) were written before they started. Neither touched the other's files. I moved their SHA-256 helper to `lib/hash.ts` afterwards for reuse. |
+| Live run: eslint 8.47 → 10.15 stored 85 releases, and the excerpt budget went to 10.15 down to 10.11, missing 10.0.0 and 9.0.0 | Raise the budget, or reprioritise | Reprioritise: migration guide, changelog, major releases (`x.0.0`), then the rest newest first. Test added. |
+| Live run: `accepts` shows latest 1.3.8 while 2.0.0 exists | Treat the highest stable as latest | Keep npm's `latest` dist-tag (it really is 1.3.8, with `next: 2.0.0`). "Latest in range" still finds 2.0.0. The maintainers' tag is the authority. |

@@ -18,5 +18,14 @@
       "database_id": "00000000-0000-0000-0000-000000000000",
       "migrations_dir": "migrations"
     }
-  ]
+  ],
+  "queues": {
+    "producers": [{ "binding": "SCAN_QUEUE", "queue": "upgradepilot-scans" }],
+    // One message per invocation: each scan step gets the full Free-plan budget (50 subrequests, 50 D1 queries).
+    "consumers": [{ "queue": "upgradepilot-scans", "max_batch_size": 1, "max_retries": 3 }]
+  },
+  "triggers": {
+    // Recovery sweep: re-enqueues scans whose step was lost or crashed.
+    "crons": ["*/5 * * * *"]
+  }
 }

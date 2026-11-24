@@ -6,7 +6,7 @@ import { buildServices } from '../services';
 
 export const repositoryRoutes = new Hono<AppEnv>().post('/repositories/inspect', async (c) => {
   const { url } = await parseJsonBody(c, InspectRepositoryRequestSchema);
-  const { repositories } = buildServices(c.env, c.get('logger'));
+  const { repositories } = buildServices(c.env, c.get('logger'), c.get('fetchImpl'));
   const result = await repositories.inspect(url);
   return jsonResponse(c, InspectRepositoryResponseSchema, result);
 });

@@ -39,6 +39,16 @@ const GitHubTreeSchema = z.object({
   ),
 });
 
+const GitHubReleaseSchema = z.object({
+  tag_name: z.string(),
+  html_url: z.string(),
+  body: z.string().nullable(),
+  draft: z.boolean(),
+  prerelease: z.boolean(),
+  published_at: z.string().nullable(),
+});
+export type GitHubRelease = z.infer<typeof GitHubReleaseSchema>;
+
 export interface TreeFile {
   path: string;
   size: number | undefined;
@@ -53,6 +63,8 @@ export interface GitHubClient {
   getTree(owner: string, name: string, commitSha: string): Promise<{ files: TreeFile[]; truncated: boolean }>;
   /** Raw file contents at a commit. Not counted against the GitHub API rate limit. */
   getFile(owner: string, name: string, commitSha: string, path: string, maxBytes: number): Promise<string>;
+  /** First page (100) of releases, newest first. */
+  listReleases(owner: string, name: string): Promise<GitHubRelease[]>;
 }
 
 /** Encodes each path segment but keeps the slashes, for branch names and file paths. */
@@ -105,5 +117,11 @@ export function createGitHubClient({ http, token }: { http: HttpClient; token?: 
         `${RAW}/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/${encodeURIComponent(commitSha)}/${encodePath(path)}`,
         { headers: { 'User-Agent': 'UpgradePilot' }, maxBytes },
       ),
+
+    listReleases: (owner, name) =>
+      http.getJson(`${repoPath(owner, name)}/releases?per_page=100`, z.array(GitHubReleaseSchema), {
+        headers: apiHeaders,
+        maxBytes: 3 * 1024 * 1024,
+      }),
   };
 }
