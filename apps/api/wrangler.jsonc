@@ -1,0 +1,22 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "upgradepilot",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-01",
+  "observability": {
+    "enabled": true
+  },
+  "vars": {
+    "LOG_LEVEL": "info"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "upgradepilot",
+      // Replace with the ID printed by `wrangler d1 create upgradepilot` before deploying.
+      // Any value works for local development.
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ]
+}
