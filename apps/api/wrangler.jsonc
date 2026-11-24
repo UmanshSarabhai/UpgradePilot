@@ -32,9 +32,8 @@
     {
       "binding": "DB",
       "database_name": "upgradepilot",
-      // Replace with the ID printed by `wrangler d1 create upgradepilot` before deploying.
-      // Any value works for local development.
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      // From `wrangler d1 create upgradepilot`. Forks: create your own database and replace this ID.
+      "database_id": "aacc7828-21d0-4ec7-8816-8dc62e933edf",
       "migrations_dir": "migrations"
     }
   ],
