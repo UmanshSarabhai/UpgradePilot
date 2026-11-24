@@ -4,6 +4,10 @@ import type { Logger } from './lib/logger';
 /** Bindings from wrangler.jsonc plus secrets, which `wrangler types` only sees when .dev.vars exists. */
 export type Bindings = Env & {
   GITHUB_TOKEN?: string;
+  ANTHROPIC_API_KEY?: string;
+  OPENAI_API_KEY?: string;
+  /** Overrides the AI provider's default model. Required for OpenAI. */
+  AI_MODEL?: string;
 };
 
 export interface AppEnv {

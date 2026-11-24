@@ -3,15 +3,17 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "wrangler dev",
+    "dev": "wrangler dev --local",
     "deploy": "wrangler deploy",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "cf-typegen": "wrangler types",
     "db:migrate:local": "wrangler d1 migrations apply upgradepilot --local",
-    "db:migrate:remote": "wrangler d1 migrations apply upgradepilot --remote"
+    "db:migrate:remote": "wrangler d1 migrations apply upgradepilot --remote",
+    "dev:remote-ai": "wrangler dev"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^1.13.0",
     "@upgradepilot/shared": "*",
     "hono": "^4.13.21",
     "semver": "^7.8.6",

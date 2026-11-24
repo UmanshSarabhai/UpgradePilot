@@ -11,6 +11,8 @@ export interface RequestOptions {
 export interface HttpClient {
   getText(url: string, options?: RequestOptions): Promise<string>;
   getJson<T>(url: string, schema: z.ZodType<T>, options?: RequestOptions): Promise<T>;
+  /** POST a JSON body and validate the JSON response. For read-only query endpoints (retried like GETs). */
+  postJson<T>(url: string, body: unknown, schema: z.ZodType<T>, options?: RequestOptions): Promise<T>;
 }
 
 export interface HttpClientOptions {
@@ -31,8 +33,13 @@ export interface HttpClientOptions {
 const MAX_REDIRECTS = 3;
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
+interface Payload {
+  method: 'GET' | 'POST';
+  body?: string;
+}
+
 /**
- * GET-only HTTP client for third-party APIs. Enforces a host allowlist (SSRF guard), timeouts,
+ * HTTP client for third-party APIs (GET, plus POST for read-only query endpoints). Enforces a host allowlist (SSRF guard), timeouts,
  * a response size cap, retries with exponential backoff and jitter, and rate-limit detection.
  * Identical in-flight GETs share one request.
  */
@@ -52,12 +59,13 @@ export function createHttpClient(options: HttpClientOptions): HttpClient {
     }
   }
 
-  async function fetchFollowingRedirects(url: URL, headers: Record<string, string>): Promise<Response> {
+  async function fetchFollowingRedirects(url: URL, headers: Record<string, string>, payload: Payload): Promise<Response> {
     let current = url;
     for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
       assertAllowed(current);
       const response = await doFetch(current.toString(), {
-        method: 'GET',
+        method: payload.method,
+        body: payload.body,
         headers,
         redirect: 'manual',
         signal: AbortSignal.timeout(timeoutMs),
@@ -70,10 +78,10 @@ export function createHttpClient(options: HttpClientOptions): HttpClient {
     throw new UpstreamError('http_error', 'Too many redirects', { url: url.toString() });
   }
 
-  async function attemptOnce(url: URL, headers: Record<string, string>, maxBytes: number): Promise<string> {
+  async function attemptOnce(url: URL, headers: Record<string, string>, maxBytes: number, payload: Payload): Promise<string> {
     let response: Response;
     try {
-      response = await fetchFollowingRedirects(url, headers);
+      response = await fetchFollowingRedirects(url, headers, payload);
     } catch (error) {
       if (error instanceof UpstreamError) throw error;
       const isTimeout = error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError');
@@ -96,14 +104,14 @@ export function createHttpClient(options: HttpClientOptions): HttpClient {
     throw new UpstreamError('http_error', `${url.hostname} returned ${response.status}`, info);
   }
 
-  async function request(rawUrl: string, requestOptions: RequestOptions = {}): Promise<string> {
+  async function request(rawUrl: string, requestOptions: RequestOptions = {}, payload: Payload = { method: 'GET' }): Promise<string> {
     const url = new URL(rawUrl);
     const headers = { ...options.headers, ...requestOptions.headers };
     const maxBytes = requestOptions.maxBytes ?? defaultMaxBytes;
 
     for (let attempt = 1; ; attempt++) {
       try {
-        return await attemptOnce(url, headers, maxBytes);
+        return await attemptOnce(url, headers, maxBytes, payload);
       } catch (error) {
         if (!(error instanceof UpstreamError) || attempt >= maxAttempts) throw error;
         const delay = retryDelay(error, attempt);
@@ -136,8 +144,7 @@ export function createHttpClient(options: HttpClientOptions): HttpClient {
     return promise;
   }
 
-  async function getJson<T>(url: string, schema: z.ZodType<T>, requestOptions?: RequestOptions): Promise<T> {
-    const text = await getText(url, requestOptions);
+  function parseJson<T>(url: string, text: string, schema: z.ZodType<T>): T {
     let data: unknown;
     try {
       data = JSON.parse(text);
@@ -156,7 +163,18 @@ export function createHttpClient(options: HttpClientOptions): HttpClient {
     return parsed.data;
   }
 
-  return { getText, getJson };
+  return {
+    getText,
+    getJson: async (url, schema, requestOptions) => parseJson(url, await getText(url, requestOptions), schema),
+    postJson: async (url, body, schema, requestOptions) => {
+      const text = await request(
+        url,
+        { ...requestOptions, headers: { 'content-type': 'application/json', ...requestOptions?.headers } },
+        { method: 'POST', body: JSON.stringify(body) },
+      );
+      return parseJson(url, text, schema);
+    },
+  };
 }
 
 function isRateLimited(response: Response): boolean {

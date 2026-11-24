@@ -26,7 +26,14 @@ export interface DiscoveryResult {
   skippedManifests: string[];
   treeTruncated: boolean;
   warnings: string[];
+  /** Config-like files next to the selected manifests, for the AI to cite as potentially affected. */
+  configFiles: string[];
 }
+
+const MAX_CONFIG_FILES = 200;
+// eslint.config.js, vite.config.ts, .eslintrc.json, .prettierrc, .babelrc, tsconfig.base.json, .nvmrc ...
+const CONFIG_FILE =
+  /^(?:\.[\w-]+rc(?:\.(?:js|cjs|mjs|ts|json|ya?ml))?|[\w-]+\.config\.(?:js|cjs|mjs|ts|cts|mts|json)|tsconfig(?:\.[\w-]+)?\.json|\.node-version)$/i;
 
 type LockState = LockfileIndex | 'unreadable';
 
@@ -116,7 +123,13 @@ export async function discoverDependencies(files: RepositoryFiles): Promise<Disc
     }
   });
 
-  return { dependencies, manifests, skippedManifests: skipped, treeTruncated: listing.truncated, warnings };
+  const manifestDirs = new Set(selected.map(dirname));
+  const configFiles = [...paths]
+    .filter((path) => manifestDirs.has(dirname(path)) && CONFIG_FILE.test(path.split('/').pop() ?? ''))
+    .sort()
+    .slice(0, MAX_CONFIG_FILES);
+
+  return { dependencies, manifests, skippedManifests: skipped, treeTruncated: listing.truncated, warnings, configFiles };
 }
 
 async function readLockfile(files: RepositoryFiles, path: string, warnings: string[]): Promise<LockState> {

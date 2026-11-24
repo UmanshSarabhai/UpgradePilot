@@ -1,12 +1,19 @@
 import type {
+  Advisory,
+  AnalysisStatus,
   DependencyListQuery,
   DependencyRow,
   DiscoveredDependency,
   DiscoverySummary,
+  Recommendation,
+  ReportEvidence,
+  RiskDetails,
   ScanStatus,
+  UpgradeAnalysis,
 } from '@upgradepilot/shared';
 import { AppError } from '../../lib/errors';
 import type { ReleaseEvidence } from '../release-notes/types';
+import type { ReportDependency } from '../report/types';
 import type { VersionResolution } from '../versions/types';
 
 /** Spec kinds that point at the npm registry. Their rows start with upgrade_type NULL, meaning "not resolved yet". */
@@ -59,6 +66,109 @@ export interface UpgradeGroup {
   dependencyIds: string[];
 }
 
+
+export interface RiskCandidateRow {
+  id: string;
+  registryName: string;
+  manifestPath: string;
+  currentVersion: string | null;
+  targetVersion: string | null;
+  upgradeType: 'patch' | 'minor' | 'major' | 'unresolved';
+  registryFacts: string | null;
+  /** JSON array, 'unavailable', or null when not looked up. */
+  advisories: string | null;
+  analysisStatus: AnalysisStatus | null;
+}
+
+export interface StoredEvidence extends ReportEvidence {
+  excerpt: string | null;
+}
+
+export interface AnalysisGroupRow {
+  id: string;
+  manifestPath: string;
+  dependencyType: DependencyRow['dependencyType'];
+  declaredRange: string;
+  riskLevel: 'low' | 'medium' | 'high';
+  recommendation: Recommendation;
+  riskDetails: RiskDetails;
+}
+
+export interface AnalysisGroup {
+  registryName: string;
+  currentVersion: string;
+  targetVersion: string;
+  upgradeType: 'patch' | 'minor' | 'major';
+  force: boolean;
+  rows: AnalysisGroupRow[];
+}
+
+export interface AssessedRisk {
+  riskLevel: 'low' | 'medium' | 'high' | 'unknown';
+  recommendation: Recommendation | null;
+  details: RiskDetails | null;
+}
+
+interface AnalysisDbRow {
+  dependency_id: string;
+  package_name: string;
+  registry_name: string | null;
+  current_version: string;
+  target_version: string;
+  upgrade_type: 'patch' | 'minor' | 'major';
+  provider: string;
+  model: string;
+  risk_level: 'low' | 'medium' | 'high';
+  summary: string;
+  breaking_changes: string;
+  deprecated_features: string;
+  migration_steps: string;
+  affected_files: string;
+  compatibility_concerns: string;
+  confidence: number;
+  recommendation: Recommendation;
+  is_inconclusive: number;
+  evidence: string;
+}
+
+function toAnalysis(row: AnalysisDbRow): UpgradeAnalysis {
+  return {
+    packageName: row.registry_name ?? row.package_name,
+    currentVersion: row.current_version,
+    targetVersion: row.target_version,
+    upgradeType: row.upgrade_type,
+    provider: row.provider,
+    model: row.model,
+    riskLevel: row.risk_level,
+    confidence: row.confidence,
+    inconclusive: row.is_inconclusive === 1,
+    summary: row.summary,
+    breakingChanges: JSON.parse(row.breaking_changes),
+    deprecatedFeatures: JSON.parse(row.deprecated_features),
+    migrationSteps: JSON.parse(row.migration_steps),
+    compatibilityConcerns: JSON.parse(row.compatibility_concerns),
+    potentiallyAffectedFiles: JSON.parse(row.affected_files),
+    recommendation: row.recommendation,
+    evidence: JSON.parse(row.evidence),
+  };
+}
+
+function parseJsonOr<T>(json: string | null, fallback: T): T {
+  if (json === null) return fallback;
+  try {
+    return JSON.parse(json) as T;
+  } catch {
+    return fallback;
+  }
+}
+
+const ANALYSIS_SELECT = `
+  SELECT ua.dependency_id, d.package_name, d.registry_name, d.current_version, d.target_version, d.upgrade_type,
+         ua.provider, ua.model, ua.risk_level, ua.summary, ua.breaking_changes, ua.deprecated_features,
+         ua.migration_steps, ua.affected_files, ua.compatibility_concerns, ua.confidence, ua.recommendation,
+         ua.is_inconclusive, ua.evidence
+  FROM upgrade_analyses ua JOIN dependencies d ON d.id = ua.dependency_id`;
+
 interface ScanRow {
   id: string;
   repository_id: string;
@@ -96,6 +206,8 @@ interface DependencyDbRow {
   target_version: string | null;
   upgrade_type: DependencyRow['upgradeType'];
   risk_level: DependencyRow['riskLevel'];
+  recommendation: DependencyRow['recommendation'];
+  analysis_status: DependencyRow['analysisStatus'];
   is_deprecated: number;
   deprecation_message: string | null;
   registry_error: DependencyRow['registryError'];
@@ -147,6 +259,8 @@ function toDependencyRow(row: DependencyDbRow): DependencyRow {
     targetVersion: row.target_version,
     upgradeType: row.upgrade_type,
     riskLevel: row.risk_level,
+    recommendation: row.recommendation,
+    analysisStatus: row.analysis_status,
     isDeprecated: row.is_deprecated === 1,
     deprecationMessage: row.deprecation_message,
     registryError: row.registry_error,
@@ -508,6 +622,349 @@ export function createScanStore(db: D1Database, now: () => string = () => new Da
       const items = ((rows?.results ?? []) as DependencyDbRow[]).map(toDependencyRow);
       const total = ((count?.results ?? []) as Array<{ total: number }>)[0]?.total ?? 0;
       return { items, total };
+    },
+
+    /** Rows with a known installed version whose advisories have not been looked up yet. */
+    async pendingAdvisoryRows(scanId: string): Promise<Array<{ id: string; registryName: string; currentVersion: string }>> {
+      const { results } = await db
+        .prepare(
+          `SELECT id, registry_name, current_version FROM dependencies
+           WHERE scan_id = ? AND advisories IS NULL AND current_version IS NOT NULL AND registry_name IS NOT NULL
+             AND upgrade_type IN ('patch', 'minor', 'major', 'up_to_date')`,
+        )
+        .bind(scanId)
+        .all<{ id: string; registry_name: string; current_version: string }>();
+      return results.map((r) => ({ id: r.id, registryName: r.registry_name, currentVersion: r.current_version }));
+    },
+
+    saveAdvisories(dependencyId: string, advisories: Advisory[] | 'unavailable'): D1PreparedStatement {
+      return db
+        .prepare('UPDATE dependencies SET advisories = ? WHERE id = ?')
+        .bind(advisories === 'unavailable' ? 'unavailable' : JSON.stringify(advisories), dependencyId);
+    },
+
+    /** Upgrade and unresolved rows with no risk level yet. */
+    async riskCandidates(scanId: string): Promise<RiskCandidateRow[]> {
+      const { results } = await db
+        .prepare(
+          `SELECT id, COALESCE(registry_name, package_name) AS registry_name, manifest_path, current_version,
+                  target_version, upgrade_type, registry_facts, advisories, analysis_status
+           FROM dependencies
+           WHERE scan_id = ? AND risk_level IS NULL AND upgrade_type IN ('patch', 'minor', 'major', 'unresolved')`,
+        )
+        .bind(scanId)
+        .all<{
+          id: string;
+          registry_name: string;
+          manifest_path: string;
+          current_version: string | null;
+          target_version: string | null;
+          upgrade_type: RiskCandidateRow['upgradeType'];
+          registry_facts: string | null;
+          advisories: string | null;
+          analysis_status: AnalysisStatus | null;
+        }>();
+      return results.map((r) => ({
+        id: r.id,
+        registryName: r.registry_name,
+        manifestPath: r.manifest_path,
+        currentVersion: r.current_version,
+        targetVersion: r.target_version,
+        upgradeType: r.upgrade_type,
+        registryFacts: r.registry_facts,
+        advisories: r.advisories,
+        analysisStatus: r.analysis_status,
+      }));
+    },
+
+    /** Installed versions per manifest: manifest path → package name → version. */
+    async manifestVersions(scanId: string): Promise<Record<string, Record<string, string>>> {
+      const { results } = await db
+        .prepare('SELECT manifest_path, package_name, current_version FROM dependencies WHERE scan_id = ? AND current_version IS NOT NULL')
+        .bind(scanId)
+        .all<{ manifest_path: string; package_name: string; current_version: string }>();
+      const byManifest: Record<string, Record<string, string>> = {};
+      for (const row of results) (byManifest[row.manifest_path] ??= {})[row.package_name] = row.current_version;
+      return byManifest;
+    },
+
+    /** Evidence rows per dependency id. Excerpts are included only when asked for. */
+    async evidenceByDependency(
+      where: { scanId: string } | { dependencyId: string },
+      includeExcerpts: boolean,
+    ): Promise<Record<string, StoredEvidence[]>> {
+      const filter = 'scanId' in where ? 'd.scan_id = ?' : 'rs.dependency_id = ?';
+      const { results } = await db
+        .prepare(
+          `SELECT rs.dependency_id, rs.source_url, rs.source_type, rs.version, rs.retrieval_status,
+                  ${includeExcerpts ? 'rs.content_excerpt' : 'NULL'} AS content_excerpt
+           FROM release_sources rs JOIN dependencies d ON d.id = rs.dependency_id
+           WHERE ${filter}`,
+        )
+        .bind('scanId' in where ? where.scanId : where.dependencyId)
+        .all<{
+          dependency_id: string;
+          source_url: string;
+          source_type: StoredEvidence['sourceType'];
+          version: string | null;
+          retrieval_status: StoredEvidence['retrievalStatus'];
+          content_excerpt: string | null;
+        }>();
+      const byDependency: Record<string, StoredEvidence[]> = {};
+      for (const row of results) {
+        (byDependency[row.dependency_id] ??= []).push({
+          sourceUrl: row.source_url,
+          sourceType: row.source_type,
+          version: row.version,
+          retrievalStatus: row.retrieval_status,
+          excerpt: row.content_excerpt,
+        });
+      }
+      return byDependency;
+    },
+
+    /**
+     * Stores the deterministic assessment. `analysisStatus` is only applied when the row has none yet,
+     * so a pending re-analysis request is kept.
+     */
+    saveRisk(dependencyId: string, risk: AssessedRisk, analysisStatus: AnalysisStatus | null, analysisNote: string | null): D1PreparedStatement {
+      return db
+        .prepare(
+          `UPDATE dependencies SET risk_level = ?, recommendation = ?, risk_factors = ?,
+             analysis_note = CASE WHEN analysis_status IS NULL THEN ? ELSE analysis_note END,
+             analysis_status = COALESCE(analysis_status, ?)
+           WHERE id = ?`,
+        )
+        .bind(
+          risk.riskLevel,
+          risk.recommendation,
+          risk.details ? JSON.stringify(risk.details) : null,
+          analysisNote,
+          analysisStatus,
+          dependencyId,
+        );
+    },
+
+    /** Upgrades waiting for AI, one group per (package, current, target), majors first. */
+    async pendingAnalysisGroups(scanId: string, limit: number): Promise<AnalysisGroup[]> {
+      const { results } = await db
+        .prepare(
+          `SELECT COALESCE(registry_name, package_name) AS registry_name, current_version, target_version, upgrade_type,
+                  MAX(analysis_status = 'pending_force') AS force,
+                  json_group_array(json_object(
+                    'id', id, 'manifestPath', manifest_path, 'dependencyType', dependency_type,
+                    'declaredRange', declared_range, 'riskLevel', risk_level, 'recommendation', recommendation,
+                    'riskFactors', risk_factors)) AS rows
+           FROM dependencies
+           WHERE scan_id = ? AND analysis_status IN ('pending', 'pending_force')
+           GROUP BY 1, 2, 3
+           ORDER BY CASE upgrade_type WHEN 'major' THEN 0 WHEN 'minor' THEN 1 ELSE 2 END, 1
+           LIMIT ?`,
+        )
+        .bind(scanId, limit)
+        .all<{
+          registry_name: string;
+          current_version: string;
+          target_version: string;
+          upgrade_type: AnalysisGroup['upgradeType'];
+          force: number;
+          rows: string;
+        }>();
+      return results.map((r) => ({
+        registryName: r.registry_name,
+        currentVersion: r.current_version,
+        targetVersion: r.target_version,
+        upgradeType: r.upgrade_type,
+        force: r.force === 1,
+        rows: (
+          JSON.parse(r.rows) as Array<Omit<AnalysisGroupRow, 'riskDetails'> & { riskFactors: string | null }>
+        ).map(({ riskFactors, ...row }) => ({
+          ...row,
+          riskDetails: parseJsonOr<RiskDetails>(riskFactors, { factors: [], reasons: [] }),
+        })),
+      }));
+    },
+
+    async analysisProgress(scanId: string): Promise<{ total: number; pending: number }> {
+      const key = `COALESCE(registry_name, package_name) || '@' || current_version || '>' || target_version`;
+      const row = await db
+        .prepare(
+          `SELECT COUNT(DISTINCT CASE WHEN analysis_status NOT IN ('not_needed') THEN ${key} END) AS total,
+                  COUNT(DISTINCT CASE WHEN analysis_status IN ('pending', 'pending_force') THEN ${key} END) AS pending
+           FROM dependencies WHERE scan_id = ? AND analysis_status IS NOT NULL`,
+        )
+        .bind(scanId)
+        .first<{ total: number; pending: number }>();
+      return { total: row?.total ?? 0, pending: row?.pending ?? 0 };
+    },
+
+    /** The newest stored analysis with this input hash, from any scan. */
+    async findCachedAnalysis(inputHash: string): Promise<UpgradeAnalysis | null> {
+      const row = await db
+        .prepare(`${ANALYSIS_SELECT} WHERE ua.input_hash = ? ORDER BY ua.created_at DESC LIMIT 1`)
+        .bind(inputHash)
+        .first<AnalysisDbRow>();
+      return row ? toAnalysis(row) : null;
+    },
+
+    /** Statements that replace the analysis of each dependency. */
+    saveAnalysis(dependencyIds: string[], analysis: UpgradeAnalysis, inputHash: string): D1PreparedStatement[] {
+      const timestamp = now();
+      const insert = db.prepare(
+        `INSERT INTO upgrade_analyses (id, dependency_id, provider, model, input_hash, risk_level, summary, breaking_changes,
+           deprecated_features, migration_steps, affected_files, compatibility_concerns, confidence, recommendation,
+           is_inconclusive, evidence, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      );
+      return dependencyIds.flatMap((dependencyId) => [
+        db.prepare('DELETE FROM upgrade_analyses WHERE dependency_id = ?').bind(dependencyId),
+        insert.bind(
+          crypto.randomUUID(),
+          dependencyId,
+          analysis.provider,
+          analysis.model,
+          inputHash,
+          analysis.riskLevel,
+          analysis.summary,
+          JSON.stringify(analysis.breakingChanges),
+          JSON.stringify(analysis.deprecatedFeatures),
+          JSON.stringify(analysis.migrationSteps),
+          JSON.stringify(analysis.potentiallyAffectedFiles),
+          JSON.stringify(analysis.compatibilityConcerns),
+          analysis.confidence,
+          analysis.recommendation,
+          analysis.inconclusive ? 1 : 0,
+          JSON.stringify(analysis.evidence),
+          timestamp,
+        ),
+      ]);
+    },
+
+    /** Records the AI outcome for one dependency, with the merged risk when there is one. */
+    saveAnalysisOutcome(
+      dependencyId: string,
+      status: AnalysisStatus,
+      note: string | null,
+      merged: { riskLevel: string; recommendation: Recommendation; details: RiskDetails } | null,
+    ): D1PreparedStatement {
+      return db
+        .prepare(
+          `UPDATE dependencies SET analysis_status = ?, analysis_note = ?,
+             risk_level = COALESCE(?, risk_level), recommendation = COALESCE(?, recommendation),
+             risk_factors = COALESCE(?, risk_factors)
+           WHERE id = ?`,
+        )
+        .bind(
+          status,
+          note,
+          merged?.riskLevel ?? null,
+          merged?.recommendation ?? null,
+          merged ? JSON.stringify(merged.details) : null,
+          dependencyId,
+        );
+    },
+
+    markRemainingSkipped(scanId: string, note: string): D1PreparedStatement {
+      return db
+        .prepare(
+          `UPDATE dependencies SET analysis_status = 'skipped', analysis_note = ?
+           WHERE scan_id = ? AND analysis_status IN ('pending', 'pending_force')`,
+        )
+        .bind(note, scanId);
+    },
+
+    /** Everything the report needs, read in one batch. */
+    async reportData(scanId: string): Promise<{
+      dependencies: ReportDependency[];
+      analyses: Record<string, UpgradeAnalysis>;
+      evidence: Record<string, ReportEvidence[]>;
+      primaryLanguage: string | null;
+    }> {
+      const [deps, analyses, language] = await db.batch([
+        db.prepare('SELECT * FROM dependencies WHERE scan_id = ? ORDER BY package_name, manifest_path').bind(scanId),
+        db.prepare(`${ANALYSIS_SELECT} WHERE d.scan_id = ? ORDER BY ua.created_at`).bind(scanId),
+        db
+          .prepare('SELECT r.primary_language FROM scans s JOIN repositories r ON r.id = s.repository_id WHERE s.id = ?')
+          .bind(scanId),
+      ]);
+      const dependencyRows = (deps?.results ?? []) as Array<
+        DependencyDbRow & { risk_factors: string | null; advisories: string | null; analysis_note: string | null }
+      >;
+      const byId: Record<string, UpgradeAnalysis> = {};
+      for (const row of (analyses?.results ?? []) as AnalysisDbRow[]) byId[row.dependency_id] = toAnalysis(row);
+      const evidence = await this.evidenceByDependency({ scanId }, false);
+      return {
+        dependencies: dependencyRows.map((row) => ({
+          ...toDependencyRow(row),
+          riskDetails: parseJsonOr<RiskDetails | null>(row.risk_factors, null),
+          advisories:
+            row.advisories === null || row.advisories === 'unavailable' ? null : parseJsonOr<Advisory[] | null>(row.advisories, null),
+          analysisStatus: row.analysis_status,
+          analysisNote: row.analysis_note,
+        })),
+        analyses: byId,
+        evidence: Object.fromEntries(
+          Object.entries(evidence).map(([id, items]) => [id, items.map(({ excerpt: _excerpt, ...item }) => item)]),
+        ),
+        primaryLanguage: ((language?.results ?? []) as Array<{ primary_language: string | null }>)[0]?.primary_language ?? null,
+      };
+    },
+
+    saveReport(scanId: string, reportJson: string): D1PreparedStatement {
+      return db.prepare('UPDATE scans SET report = ? WHERE id = ?').bind(reportJson, scanId);
+    },
+
+    async getReport(scanId: string): Promise<string | null> {
+      const row = await db.prepare('SELECT report FROM scans WHERE id = ?').bind(scanId).first<{ report: string | null }>();
+      return row?.report ?? null;
+    },
+
+    /**
+     * Queues AI analysis again for some upgrades of a completed scan and reopens the scan at ANALYZING_UPGRADES.
+     * Risk is reset so the deterministic floor is recomputed before the new analysis is merged.
+     * Returns the step the next queue message must carry, or null when no listed dependency is an upgrade.
+     */
+    async requestReanalysis(scanId: string, dependencyIds: string[], force: boolean): Promise<number | null> {
+      const placeholders = dependencyIds.map(() => '?').join(', ');
+      const match = `scan_id = ? AND id IN (${placeholders}) AND upgrade_type IN ('patch', 'minor', 'major')`;
+      const count = await db
+        .prepare(`SELECT COUNT(*) AS n FROM dependencies WHERE ${match}`)
+        .bind(scanId, ...dependencyIds)
+        .first<{ n: number }>();
+      if (!count?.n) return null;
+
+      const timestamp = now();
+      try {
+        const results = await db.batch([
+          db
+            .prepare(
+              `UPDATE scans SET status = 'ANALYZING_UPGRADES', progress = 75, current_stage = 'Re-analysing upgrades',
+                 completed_at = NULL, report = NULL, error_message = NULL, attempt_count = 0,
+                 lease_expires_at = NULL, next_attempt_at = NULL, step_seq = step_seq + 1, updated_at = ?
+               WHERE id = ? AND status = 'COMPLETED'`,
+            )
+            .bind(timestamp, scanId),
+          db
+            .prepare(
+              `UPDATE dependencies SET analysis_status = ?, analysis_note = NULL, risk_level = NULL,
+                 recommendation = NULL, risk_factors = NULL
+               WHERE ${match} AND EXISTS (SELECT 1 FROM scans WHERE id = ? AND status = 'ANALYZING_UPGRADES')`,
+            )
+            .bind(force ? 'pending_force' : 'pending', scanId, ...dependencyIds, scanId),
+          db.prepare('SELECT step_seq FROM scans WHERE id = ?').bind(scanId),
+        ]);
+        if ((results[0]?.meta.changes ?? 0) !== 1) {
+          throw new AppError('CONFLICT', 'Only completed scans can be re-analysed.', 409);
+        }
+        return ((results[2]?.results ?? []) as Array<{ step_seq: number }>)[0]?.step_seq ?? null;
+      } catch (error) {
+        if (error instanceof AppError) throw error;
+        // The partial unique index allows one unfinished scan per repository and branch.
+        if (error instanceof Error && /UNIQUE/i.test(error.message)) {
+          throw new AppError('CONFLICT', 'Another scan of this branch is running. Try again when it finishes.', 409);
+        }
+        throw error;
+      }
     },
   };
 }

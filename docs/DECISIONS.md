@@ -57,9 +57,9 @@ Each entry gives the decision, the reason, and what we gave up. Newest last.
 
 **Trade-off.** A real package outside the declared workspaces is missed. The report lists the skipped paths so nothing is hidden.
 
-## ADR-007: npm cache in D1, AI results in KV (revised in Phase 2)
+## ADR-007: npm cache and AI results in D1 (revised in Phases 2 and 3)
 
-**Decision.** Reduced npm data (dist-tags, one version's manifest, version lists) goes in a D1 table, `registry_cache`, with an expiry column. KV holds only AI results, keyed by a hash of the full AI input. GitHub responses are not cached.
+**Decision.** Reduced npm data (dist-tags, one version's manifest, version lists) goes in a D1 table, `registry_cache`, with an expiry column. AI results are reused from `upgrade_analyses` by `input_hash` (Phase 3 change: KV was the plan, but the table already stores the hash with an index, so KV would only add a binding). GitHub responses are not cached.
 
 **Why.** The first version of this ADR put HTTP responses in the Cache API. The Cloudflare docs promise working cache operations only on custom domains and Pages, and a free deploy lives on `*.workers.dev`. KV allows only 1,000 writes a day. D1 allows 100,000 row writes a day and is already bound. Storing reduced JSON instead of raw bodies also saves the parse CPU on a hit.
 
@@ -73,9 +73,9 @@ Each entry gives the decision, the reason, and what we gave up. Newest last.
 
 **Trade-off.** Some upgrades look riskier than they are. The report shows why, so the user can judge.
 
-## ADR-009: AI provider keys are server-side secrets
+## ADR-009: AI providers and keys (expanded in Phase 3)
 
-**Decision.** Workers AI is the default provider. Anthropic or OpenAI is used when the owner sets `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` as a Cloudflare secret. The browser never sends or receives keys.
+**Decision.** `AI_PROVIDER` picks the provider: `workers-ai` (default, free tier, `@cf/meta/llama-3.3-70b-instruct-fp8-fast` with JSON mode), `anthropic` (official `@anthropic-ai/sdk`, `claude-opus-5-5`, Zod structured outputs, effort `medium`, server-side refusal fallbacks) or `openai` (plain `fetch`, JSON schema response format, `AI_MODEL` required because no default is pinned here). `AI_MODEL` overrides any default. Keys are Cloudflare secrets (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`). The browser never sends or receives keys.
 
 **Why.** This is a personal tool with no user accounts. Accepting keys from the browser would mean handling secrets in requests and logs for no benefit.
 
@@ -133,3 +133,23 @@ Smaller calls made while building, in order.
 | Two subagents built version resolution and release notes in parallel | Shared files, or fixed contracts first | Contract files (`versions/types.ts`, `release-notes/types.ts`, `lib/cache.ts`, shared enums) were written before they started. Neither touched the other's files. I moved their SHA-256 helper to `lib/hash.ts` afterwards for reuse. |
 | Live run: eslint 8.47 → 10.15 stored 85 releases, and the excerpt budget went to 10.15 down to 10.11, missing 10.0.0 and 9.0.0 | Raise the budget, or reprioritise | Reprioritise: migration guide, changelog, major releases (`x.0.0`), then the rest newest first. Test added. |
 | Live run: `accepts` shows latest 1.3.8 while 2.0.0 exists | Treat the highest stable as latest | Keep npm's `latest` dist-tag (it really is 1.3.8, with `next: 2.0.0`). "Latest in range" still finds 2.0.0. The maintainers' tag is the authority. |
+
+### Phase 3 (24 Nov 2026)
+
+| Situation | Options considered | Chosen, and why |
+| --- | --- | --- |
+| Work split | One agent, or parallel | Three subagents in parallel (risk rules, AI module, report) against contract files written first (`upgrade-analysis/types.ts`, `ai/types.ts`, `report/types.ts`, shared `analysis.ts` and `report.ts`). I built migration 0003, advisories, stages, routes and wiring meanwhile. No file had two writers. |
+| "Why update" vs "what could break" | One risk list | Two lists: risk factors and upgrade reasons. A security fix or a deprecated install is a reason to upgrade, not a risk of upgrading. Both are stored in `risk_factors` as `{ factors, reasons }`. |
+| Security advisories | GitHub advisory API per package; npm bulk endpoint | npm's bulk endpoint (the one `npm audit` uses): one POST per scan, no auth. A fix is claimed only when the target version is outside the vulnerable range. |
+| Which Workers AI model | Llama 3.1 8B, Llama 3.3 70B fast | Llama 3.3 70B fast: listed for JSON mode, free tier, 24k context. About 365 neurons an analysis, so about 27 a day free. |
+| Anthropic client | Raw `fetch`, or the SDK | Official SDK (`@anthropic-ai/sdk` 1.13), as the Claude API guidance requires for TypeScript. `client.beta.messages.parse` with `zodOutputFormat`, `fallbacks: "default"` (server-side refusal fallback, enabled by default), effort `medium`, timeout 120 s (Opus 5.5 always thinks). |
+| OpenAI client | Add the OpenAI SDK, or `fetch` | `fetch` in its own file. One endpoint, keeps dependencies minimal, and keeps the Anthropic code separate. |
+| What the AI may name as affected files | Ask it freely; GitHub code search; candidate list | Candidate list: the manifests plus config files named after the package, with up to two file contents included. Code search needs a token and is rate-limited to 10 a minute. Anything outside the list is dropped. |
+| AI claims citing sources it was not given | Drop them; keep them | Keep them, marked `unverified` with no link. Dropping hides possibly useful hints. Marking prevents them passing as evidence, and they cannot raise the risk level. |
+| When to call AI | Every upgrade; risky ones | Only major, medium or high risk, or breaking-change markers, and only with release text to read. Riskiest first, capped per scan (`AI_MAX_ANALYSES_PER_SCAN`, default 10). |
+| Report storage | Build on every request; snapshot | Snapshot on the scan (`scans.report`), written by `GENERATING_REPORT`. Reads are cheap and consistent. Reanalysis clears it and the stage writes a new one. |
+| Reanalysis | New scan; reopen the scan | Reopen: reset risk for the chosen upgrades, mark them `pending` (or `pending_force` to skip the cache), set the scan back to `ANALYZING_UPGRADES`. The partial unique index stops it while another scan of the branch runs (409). |
+| Workers AI binding broke local tests and `wrangler dev` (needs a Cloudflare login) | Remove the binding locally; disable remote bindings | `getPlatformProxy({ remoteBindings: false })` in tests with a fake `AI` binding, and `npm run dev` = `wrangler dev --local`. `npm run dev:remote-ai` uses real Workers AI after login. `.dev.vars.example` sets `AI_PROVIDER=none`. |
+| Live run: local "Binding AI needs to be run remotely" was recorded as `failed` | Leave it; treat as unavailable | Unavailable: it stops further AI calls for the scan and marks the rest `skipped` with the reason. |
+| Live run: summary said "0 patch, 0 minor, 1 major" and "1 dependencies" | Leave it | Zero counts dropped, singular fixed, test updated. |
+| Subagent reports: SDK schema errors come back with the SDK's wording; total evidence cap includes file excerpts | Normalise the message; separate caps | Kept both. The outcome is still `failed` with a reason, and one cap keeps the prompt inside Llama's 24k context. |

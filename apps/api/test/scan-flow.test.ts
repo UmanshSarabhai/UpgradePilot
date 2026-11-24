@@ -4,6 +4,7 @@ import {
   CreateScanResponseSchema,
   DependencyListResponseSchema,
   ErrorResponseSchema,
+  ReportSchema,
   ScanSchema,
 } from '@upgradepilot/shared';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -64,7 +65,38 @@ const upstream: Record<string, () => Response> = {
     ]),
   'raw.githubusercontent.com/facebook/react/HEAD/CHANGELOG.md': () =>
     text('# Changelog\n\n## 19.1.0\n\n- Removed legacy context.\n\n## 18.3.1\n\n- Warnings.\n\n## 18.2.0\n\n- Old.\n'),
+  'registry.npmjs.org/-/npm/v1/security/advisories/bulk': () =>
+    json({
+      'left-pad': [
+        { id: 1, url: 'https://github.com/advisories/GHSA-test', title: 'ReDoS', severity: 'high', vulnerable_versions: '<1.2.0' },
+      ],
+    }),
 };
+
+/** A model answer that cites one real evidence URL and one invented one. */
+const goodAiAnswer = {
+  riskLevel: 'high',
+  confidence: 0.8,
+  inconclusive: false,
+  summary: 'React 19 removes legacy context.',
+  breakingChanges: [
+    { text: 'Legacy context was removed.', source: 'https://github.com/facebook/react/releases/tag/v19.1.0' },
+    { text: 'createClass is gone.', source: 'https://example.com/made-up' },
+  ],
+  deprecatedFeatures: [],
+  migrationSteps: [{ text: 'Replace legacy context with createContext.', source: 'https://github.com/facebook/react/releases/tag/v19.1.0' }],
+  compatibilityConcerns: [],
+  potentiallyAffectedFiles: [{ path: 'package.json', reason: 'Declares react.' }],
+  recommendation: 'investigate',
+};
+let aiAnswer: unknown = goodAiAnswer;
+const aiCalls: unknown[] = [];
+const fakeAi = {
+  async run(_model: string, inputs: unknown) {
+    aiCalls.push(inputs);
+    return { response: aiAnswer };
+  },
+} as unknown as Ai;
 
 let overrides: Record<string, () => Response> = {};
 const fakeFetch: typeof fetch = async (input) => {
@@ -110,8 +142,16 @@ async function drive(scanId: string, fromStep = 0) {
 }
 
 beforeAll(async () => {
-  proxy = await getPlatformProxy<Env>({ configPath: 'wrangler.jsonc', persist: false });
-  env = { ...proxy.env, SCAN_QUEUE: fakeQueue, LOG_LEVEL: 'error' } as unknown as Env;
+  // remoteBindings: false keeps Workers AI from requiring a Cloudflare login; the AI binding is faked instead.
+  proxy = await getPlatformProxy<Env>({ configPath: 'wrangler.jsonc', persist: false, remoteBindings: false });
+  env = {
+    ...proxy.env,
+    SCAN_QUEUE: fakeQueue,
+    AI: fakeAi,
+    AI_PROVIDER: 'workers-ai',
+    AI_MAX_ANALYSES_PER_SCAN: '10',
+    LOG_LEVEL: 'error',
+  } as unknown as Env;
   const migrations = join(__dirname, '..', 'migrations');
   for (const file of readdirSync(migrations).sort()) {
     const statements = readFileSync(join(migrations, file), 'utf8')
@@ -130,6 +170,8 @@ afterAll(async () => {
 beforeEach(async () => {
   overrides = {};
   sent.length = 0;
+  aiCalls.length = 0;
+  aiAnswer = goodAiAnswer;
   await env.DB.batch(
     ['release_sources', 'upgrade_analyses', 'dependencies', 'scans', 'repositories', 'registry_cache'].map((t) =>
       env.DB.prepare(`DELETE FROM ${t}`),
@@ -183,6 +225,72 @@ describe('scan pipeline', () => {
       await (await request(`/api/scans/${scanId}/dependencies?upgradeType=minor&q=pad`)).json(),
     );
     expect(filtered.items.map((d) => d.name)).toEqual(['left-pad']);
+
+    // Analysis: react (major, release notes found) went to AI once; left-pad (deprecated, no repository) had no text to analyse.
+    expect(aiCalls).toHaveLength(1);
+    expect(list.items[0]).toMatchObject({ riskLevel: 'high', recommendation: 'investigate', analysisStatus: 'completed' });
+    expect(list.items[1]).toMatchObject({ riskLevel: 'high', analysisStatus: 'insufficient_evidence' });
+
+    const report = ReportSchema.parse(await (await request(`/api/scans/${scanId}/report`)).json());
+    expect(report.totals).toMatchObject({ dependencies: 3, outdated: 2, major: 1, minor: 1, unresolved: 1, securityFixes: 1 });
+    expect(report.groups.highRisk.map((e) => e.packageName).sort()).toEqual(['left-pad', 'react']);
+    expect(report.upgradePlan[0]).toMatchObject({ packageName: 'left-pad' });
+    const reactEntry = report.groups.highRisk.find((e) => e.packageName === 'react');
+    expect(reactEntry?.risks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ origin: 'ai', sourceUrl: 'https://github.com/facebook/react/releases/tag/v19.1.0' }),
+        expect.objectContaining({ origin: 'unverified', sourceUrl: null }),
+        expect.objectContaining({ origin: 'deterministic' }),
+      ]),
+    );
+    expect(report.ai).toMatchObject({ provider: 'workers-ai', analyzed: 1 });
+
+    const markdown = await request(`/api/scans/${scanId}/report?format=markdown`);
+    expect(markdown.headers.get('content-type')).toContain('text/markdown');
+    expect(markdown.headers.get('content-disposition')).toContain('upgradepilot-acme-shop-c0ffee0.md');
+    expect(await markdown.text()).toContain('# Upgrade report: acme/shop');
+  });
+
+  it('re-analyses from cache, or from the model when forced', async () => {
+    const { scanId } = CreateScanResponseSchema.parse(
+      await (await createScan({ url: 'https://github.com/acme/shop', branch: 'main' })).json(),
+    );
+    await drive(scanId);
+    const react = DependencyListResponseSchema.parse(
+      await (await request(`/api/scans/${scanId}/dependencies?q=react`)).json(),
+    ).items[0];
+    expect(aiCalls).toHaveLength(1);
+
+    const reanalyse = (force: boolean) =>
+      request(`/api/scans/${scanId}/reanalyze`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ dependencyIds: [react?.id], force }),
+      });
+
+    expect((await reanalyse(false)).status).toBe(202);
+    expect((await request(`/api/scans/${scanId}/report`)).status).toBe(409);
+    expect(await drive(scanId, sent.at(-1)?.body.step ?? -1)).toEqual({ kind: 'finished', status: 'COMPLETED' });
+    expect(aiCalls).toHaveLength(1);
+
+    expect((await reanalyse(true)).status).toBe(202);
+    expect(await drive(scanId, sent.at(-1)?.body.step ?? -1)).toEqual({ kind: 'finished', status: 'COMPLETED' });
+    expect(aiCalls).toHaveLength(2);
+    expect((await request(`/api/scans/${scanId}/report`)).status).toBe(200);
+  });
+
+  it('keeps the deterministic result when the AI answer is malformed', async () => {
+    aiAnswer = { nonsense: true };
+    const { scanId } = CreateScanResponseSchema.parse(
+      await (await createScan({ url: 'https://github.com/acme/shop', branch: 'main' })).json(),
+    );
+    expect(await drive(scanId)).toEqual({ kind: 'finished', status: 'COMPLETED' });
+    const react = DependencyListResponseSchema.parse(
+      await (await request(`/api/scans/${scanId}/dependencies?q=react`)).json(),
+    ).items[0];
+    expect(react).toMatchObject({ riskLevel: 'high', recommendation: 'investigate', analysisStatus: 'failed' });
+    const report = ReportSchema.parse(await (await request(`/api/scans/${scanId}/report`)).json());
+    expect(report.ai).toMatchObject({ analyzed: 0, failed: 1 });
   });
 
   it('reuses scans for the same idempotency key or an active branch scan', async () => {

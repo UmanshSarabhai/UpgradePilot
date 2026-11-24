@@ -4,7 +4,7 @@ UpgradePilot analyses the npm dependencies of a public GitHub repository and pro
 
 It runs entirely on the Cloudflare Workers Free plan: Workers, D1, Queues, KV, Workers AI and static assets.
 
-> Status: Phase 2 of 5. Scans run end to end: discovery, npm version resolution, upgrade classification and release-note collection, as queued, resumable steps. AI analysis, risk rules, reports and the dashboard are not built yet. See the [implementation plan](docs/ARCHITECTURE.md#implementation-plan).
+> Status: Phase 3 of 5. Scans run end to end: discovery, npm version resolution, release notes, security advisories, deterministic risk rules, optional AI analysis, and a report with Markdown and JSON export. The dashboard (Phase 4) and deployment guide (Phase 5) are not built yet. See the [implementation plan](docs/ARCHITECTURE.md#implementation-plan).
 
 ## Docs
 
@@ -42,7 +42,29 @@ npm run db:migrate:local -w @upgradepilot/api
 npm run dev
 ```
 
-The API listens on `http://localhost:8787`.
+The API listens on `http://localhost:8787`. `npm run dev` runs Wrangler in local mode, which has no Workers AI, so AI analysis is skipped and reports use the deterministic rules only.
+
+### AI analysis (optional)
+
+Set these in `apps/api/.dev.vars` locally, or as Cloudflare vars and secrets when deployed:
+
+| Setting | Values |
+| --- | --- |
+| `AI_PROVIDER` | `workers-ai` (default when deployed), `anthropic`, `openai`, or `none` |
+| `ANTHROPIC_API_KEY` | Needed for `anthropic`. Default model `claude-opus-5-5` |
+| `OPENAI_API_KEY`, `AI_MODEL` | Both needed for `openai` |
+| `AI_MODEL` | Overrides the provider's default model |
+| `AI_MAX_ANALYSES_PER_SCAN` | Default 10. The Workers AI free tier covers about 27 analyses a day |
+
+To try Workers AI locally, log in and use the remote-AI dev script. It spends your free neurons:
+
+```bash
+npx wrangler login
+```
+
+```bash
+npm run dev:remote-ai -w @upgradepilot/api
+```
 
 ```bash
 curl -X POST http://localhost:8787/api/repositories/inspect -H 'content-type: application/json' -d '{"url":"https://github.com/TanStack/query"}'
@@ -58,7 +80,7 @@ npm test
 npm run typecheck
 ```
 
-## API (Phase 2)
+## API
 
 | Method and path | Purpose |
 | --- | --- |
@@ -66,7 +88,9 @@ npm run typecheck
 | `POST /api/repositories/inspect` | Validate a GitHub URL, return repository metadata and branches |
 | `POST /api/scans` | Start a scan (`{ "url", "branch" }`, optional `Idempotency-Key` header). Returns 201, or 200 with `reused: true` for a duplicate |
 | `GET /api/scans/:scanId` | Status, progress, stage and discovery summary |
-| `GET /api/scans/:scanId/dependencies` | Paginated list. Filters: `upgradeType`, `dependencyType`, `riskLevel`, `q`. `sort=name\|upgradeType`, `page`, `pageSize` (max 100) |
+| `GET /api/scans/:scanId/dependencies` | Paginated list. Filters: `upgradeType`, `dependencyType`, `riskLevel`, `recommendation`, `q`. `sort=name\|upgradeType\|riskLevel`, `page`, `pageSize` (max 100) |
+| `GET /api/scans/:scanId/report` | The upgrade report as JSON, or `?format=markdown` for a `.md` download. 409 until the scan completes |
+| `POST /api/scans/:scanId/reanalyze` | `{ "dependencyIds": [...], "force": false }`. Re-runs risk and AI for those upgrades. 202 |
 
 Try a scan locally:
 
@@ -74,7 +98,13 @@ Try a scan locally:
 curl -X POST http://localhost:8787/api/scans -H 'content-type: application/json' -d '{"url":"https://github.com/expressjs/express","branch":"master"}'
 ```
 
-Then poll `GET /api/scans/<scanId>`. `wrangler dev` runs the queue consumer locally. To trigger the recovery sweep by hand, start the dev server with `--test-scheduled` and open `http://localhost:8787/__scheduled`.
+Then poll `GET /api/scans/<scanId>` until `status` is `COMPLETED`, and fetch the report:
+
+```bash
+curl -o report.md "http://localhost:8787/api/scans/<scanId>/report?format=markdown"
+```
+
+ `wrangler dev` runs the queue consumer locally. To trigger the recovery sweep by hand, start the dev server with `--test-scheduled` and open `http://localhost:8787/__scheduled`.
 
 Errors always look like `{ "error": { "code", "message", "details?", "requestId" } }`.
 
@@ -102,6 +132,12 @@ npm run db:migrate:remote -w @upgradepilot/api
 
 ```bash
 npx wrangler secret put GITHUB_TOKEN --cwd apps/api
+```
+
+Only if you use Anthropic instead of Workers AI (and set `AI_PROVIDER` to `anthropic` in `wrangler.jsonc`):
+
+```bash
+npx wrangler secret put ANTHROPIC_API_KEY --cwd apps/api
 ```
 
 ```bash

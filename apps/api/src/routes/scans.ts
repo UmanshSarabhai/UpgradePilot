@@ -5,6 +5,8 @@ import {
   DependencyListResponseSchema,
   type DiscoverySummary,
   DiscoverySummarySchema,
+  ReanalyzeRequestSchema,
+  ReportSchema,
   ScanSchema,
 } from '@upgradepilot/shared';
 import { Hono } from 'hono';
@@ -12,6 +14,7 @@ import { z } from 'zod';
 import type { AppEnv, ScanMessage } from '../env';
 import { AppError } from '../lib/errors';
 import { jsonResponse, parseJsonBody } from '../lib/validation';
+import { renderMarkdown } from '../modules/report/markdown';
 import { parseGitHubRepoUrl } from '../modules/repository/github-url';
 import type { ScanRecord } from '../modules/storage/scan-store';
 import { buildServices } from '../services';
@@ -109,4 +112,53 @@ export const scanRoutes = new Hono<AppEnv>()
       page: query.data.page,
       pageSize: query.data.pageSize,
     });
+  })
+  .get('/scans/:scanId/report', async (c) => {
+    const format = c.req.query('format') ?? 'json';
+    if (format !== 'json' && format !== 'markdown') {
+      throw new AppError('VALIDATION_ERROR', 'format must be json or markdown.', 400);
+    }
+    const { store } = buildServices(c.env, c.get('logger'), c.get('fetchImpl'));
+    const scanId = c.req.param('scanId');
+    const scan = await store.getScan(scanId);
+    if (!scan) throw notFound();
+    const stored = await store.getReport(scanId);
+    if (!stored) {
+      throw new AppError('CONFLICT', `The report is not ready. The scan is ${scan.status.toLowerCase()}.`, 409, {
+        status: scan.status,
+      });
+    }
+    const report = ReportSchema.parse(JSON.parse(stored));
+    if (format === 'json') return c.json(report);
+
+    const fileName = `upgradepilot-${scan.owner}-${scan.name}-${(scan.commitSha ?? 'report').slice(0, 7)}.md`.replace(
+      /[^\w.-]/g,
+      '_',
+    );
+    return c.body(renderMarkdown(report), 200, {
+      'Content-Type': 'text/markdown; charset=utf-8',
+      'Content-Disposition': `attachment; filename="${fileName}"`,
+    });
+  })
+
+  .post('/scans/:scanId/reanalyze', async (c) => {
+    const { dependencyIds, force } = await parseJsonBody(c, ReanalyzeRequestSchema);
+    const logger = c.get('logger');
+    const { store } = buildServices(c.env, logger, c.get('fetchImpl'));
+    const scanId = c.req.param('scanId');
+    const scan = await store.getScan(scanId);
+    if (!scan) throw notFound();
+    if (scan.status !== 'COMPLETED') {
+      throw new AppError('CONFLICT', 'Only completed scans can be re-analysed.', 409, { status: scan.status });
+    }
+    const step = await store.requestReanalysis(scanId, [...new Set(dependencyIds)], force);
+    if (step === null) {
+      throw new AppError('VALIDATION_ERROR', 'None of the dependencyIds is an upgrade in this scan.', 400);
+    }
+    try {
+      await c.env.SCAN_QUEUE.send({ scanId, step } satisfies ScanMessage);
+    } catch (error) {
+      logger.error('failed to enqueue re-analysis', { scanId, error });
+    }
+    return c.json({ scanId, status: 'ANALYZING_UPGRADES' }, 202);
   });

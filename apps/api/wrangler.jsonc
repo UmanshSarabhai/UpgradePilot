@@ -7,7 +7,14 @@
     "enabled": true
   },
   "vars": {
-    "LOG_LEVEL": "info"
+    "LOG_LEVEL": "info",
+    // workers-ai | anthropic | openai | none. Anthropic and OpenAI need ANTHROPIC_API_KEY / OPENAI_API_KEY secrets.
+    "AI_PROVIDER": "workers-ai",
+    // Upgrades analysed by AI per scan. The Workers AI free tier covers roughly 27 analyses a day.
+    "AI_MAX_ANALYSES_PER_SCAN": "10"
+  },
+  "ai": {
+    "binding": "AI"
   },
   "d1_databases": [
     {

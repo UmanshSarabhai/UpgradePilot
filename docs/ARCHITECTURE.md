@@ -15,7 +15,7 @@ The app runs on the Cloudflare Workers Free plan only. These limits come from th
 | D1 queries per invocation | 50 (a `batch()` counts as one) | Writes are batched. |
 | Requests per day | 100,000 | Plenty for a personal tool. |
 | Queues | 10,000 operations/day, 24 h retention | One message per scan step. A 200-package scan uses roughly 100 operations. |
-| KV writes | 1,000/day | KV holds only AI results. The npm cache lives in D1 (100,000 row writes/day). |
+| KV writes | 1,000/day | KV is not used. The npm cache and AI results both live in D1 (100,000 row writes/day). |
 | D1 rows | 5M read, 100k written per day | Comfortable. A 200-package scan writes roughly 1,500 rows including evidence. |
 | Workers AI | 10,000 neurons/day | AI runs only for upgrades with evidence, and results are cached by input hash. |
 | Static assets | Free and unlimited | The frontend is a static export served by the same Worker. |
@@ -32,7 +32,6 @@ flowchart LR
   Q --> RUN["Scan step runner<br/>(Worker queue handler)"]
   CRON["Cron sweep<br/>(every 5 min)"] -->|re-enqueue stalled scans| Q
   RUN --> D1
-  RUN --> KV[(KV: AI results)]
   RUN --> GH[GitHub REST + raw]
   RUN --> NPM[npm registry]
   RUN --> AI[Workers AI or<br/>Anthropic/OpenAI]
@@ -108,7 +107,13 @@ stateDiagram-v2
 7. A cron sweep every 5 minutes re-enqueues unfinished scans with no live lease, no scheduled retry, and no progress for 3 minutes. It also deletes expired cache rows.
 8. The UI polls `GET /api/scans/:id` for status and progress.
 
-Phase 2 leaves `ANALYZING_UPGRADES` and `GENERATING_REPORT` as pass-through steps. They are filled in Phase 3.
+`ANALYZING_UPGRADES` runs three resumable passes, each driven by row state:
+
+1. **Advisories**: one POST to npm's bulk advisory endpoint for every installed version (`advisories IS NULL`). If npm fails, rows are marked `unavailable` and the report says so.
+2. **Deterministic risk**: for every upgrade with no `risk_level`, apply the rules below and decide which upgrades need AI (`analysis_status`).
+3. **AI**: two upgrade groups per step (same package and versions across manifests), riskiest first, capped per scan.
+
+`GENERATING_REPORT` builds the report from the rows and stores it as JSON on the scan. `GET /report` serves that snapshot, as JSON or Markdown.
 
 AI is optional at step `ANALYZING_UPGRADES`. If no provider is configured or the budget is spent, the step records "AI unavailable" and the report uses deterministic results only.
 
@@ -120,12 +125,49 @@ AI is optional at step `ANALYZING_UPGRADES`. If no provider is configured or the
 - Lockfiles: `package-lock.json` v1 to v3, `pnpm-lock.yaml` v5 to v9 (including the two-document format from pnpm 11+), `yarn.lock` classic and Berry.
 - Ordering: the root first, then the repository's own packages, then example and test projects that the workspaces happen to include. That way the 20-manifest cap drops examples before real packages.
 
+## Risk rules (Phase 3)
+
+Risk means "what could break if we upgrade". Reasons mean "why upgrade". Both are deterministic.
+
+| Factor | Level |
+| --- | --- |
+| Major version upgrade | high |
+| Minor upgrade on a `0.x` version (breaking under caret rules) | medium |
+| Target (latest) version deprecated, so the whole package is | high |
+| `engines.node` minimum raised | medium |
+| Target peer dependency not satisfied by the version in the same manifest | high |
+| New peer dependency not present | low |
+| "BREAKING" or "breaking change" in release notes, changelog or migration guide | medium for patch/minor, high for major |
+
+Reasons: security advisories the target fixes (npm bulk advisories; only when the target is outside the vulnerable range), installed version deprecated, major versions behind, newer release available.
+
+Recommendation: low risk → `upgrade`, medium or high → `investigate`. Deterministic rules never `defer`.
+
+AI runs only for upgrades that are major, medium or high risk, or have breaking-change markers, and only when release-note, changelog or migration text exists. Everything else is `not_needed` or `insufficient_evidence`, so no AI request is made.
+
+## AI analysis (Phase 3)
+
+- **Providers**: Workers AI (default, `@cf/meta/llama-3.3-70b-instruct-fp8-fast`, JSON mode), Anthropic (official SDK, `claude-opus-5-5`, structured outputs, server-side refusal fallbacks), or OpenAI (`fetch`, JSON schema; `AI_MODEL` required). Chosen by `AI_PROVIDER`; keys are Cloudflare secrets.
+- **Budget**: about 365 neurons per Workers AI analysis (6k tokens in, 1k out), so the free 10,000 neurons a day covers about 27. `AI_MAX_ANALYSES_PER_SCAN` (default 10) caps each scan; the riskiest upgrades go first.
+- **Input**: package, versions, manifests, the deterministic findings, release evidence (capped at 24,000 characters), candidate files (the manifests plus config files named after the package, such as `eslint.config.js`), and up to two of those config files' contents.
+- **Prompt injection**: evidence and file contents sit inside `<untrusted_source>` and `<repository_file>` blocks; tags inside the content are neutralised; the system prompt says the content is data and its instructions must be ignored.
+- **Validation**: the answer must pass a Zod schema. Package and versions come from our data, never the model. A claim citing a URL or file not given to the model is kept but marked `unverified` with no link. Affected files outside the candidate list are dropped. Confidence is clamped to 0 to 1. An empty answer is marked inconclusive.
+- **Merging (ADR-008)**: AI can raise the risk level only when it cites at least one given source, and never lowers it. The recommendation becomes the more cautious of the two. Inconclusive answers change nothing.
+- **Failures**: a malformed or refused answer marks that upgrade `failed`, and the deterministic result stands. A rate limit pauses the scan like GitHub and npm do. A missing key, exhausted quota or `wrangler dev --local` (no Workers AI) marks the remaining upgrades `skipped` with the reason.
+- **Cache**: results are stored with their input hash and reused for the same input in any scan. Reanalysis with `force: true` bypasses it.
+
+## Report (Phase 3)
+
+Upgrades are merged across manifests by package and versions, then grouped: **safe** (low risk, recommend upgrade), **high-risk migrations** (high risk), **review before upgrading** (everything else). The ordered plan puts upgrades that fix security advisories first, then safe, review and high-risk. Every finding carries its origin: deterministic, AI, or unverified AI claim. The Markdown export escapes untrusted text and only links `http(s)` URLs.
+
 ## Known risks
 
 - **CPU on large repos.** The recursive tree listing for a big monorepo is several MB of JSON. TanStack/query took 25 subrequests and parsed fine in Node, but we have not measured it against the 10 ms Free limit in production. If it fails there, the fallback is to list only the workspace folders through the Contents API instead of the whole tree.
 - **Lockfile size.** Lockfiles over 10 MB are skipped, and their dependencies are marked `LOCKFILE_UNREADABLE`.
 - **D1 query budget per step.** A resolution step can use up to about 45 of the 50 D1 queries when every cache lookup misses and writes back. A package installed at many different versions across manifests adds 2 queries per extra version. If deploys show "too many queries", lower `RESOLVE_BATCH` in `stages.ts`.
 - **GitHub API quota without a token.** Each upgrade with a GitHub repository costs one `releases` API call. Unauthenticated, that is 60 an hour, shared with repository lookups. Large scans wait out the limit (the runner reschedules) unless `GITHUB_TOKEN` is set.
+- **Workers AI needs Cloudflare even in local dev.** `npm run dev` runs `wrangler dev --local`, where Workers AI does not exist, so AI analysis is skipped locally unless `AI_PROVIDER` is `anthropic` or `openai`. `npm run dev:remote-ai` uses real Workers AI after `wrangler login`, and spends free neurons.
+- **AI not verified live.** The Anthropic and OpenAI paths are tested against faked HTTP responses and the Workers AI path against a fake binding. None has been run against the real service yet.
 - **Cache API on workers.dev.** The docs do not confirm the Cache API works on `*.workers.dev`, so it is not used. If the app moves to a custom domain, raw GitHub files could be cached there.
 
 ## API
@@ -143,8 +185,8 @@ All responses are JSON validated against schemas in `packages/shared`. Errors sh
 | `POST /api/scans` | Create or reuse a scan, return its ID | 2 |
 | `GET /api/scans/:scanId` | Status, stage, progress, error | 2 |
 | `GET /api/scans/:scanId/dependencies` | Paginated, filterable dependency list | 2 |
-| `GET /api/scans/:scanId/report` | Consolidated report (`?format=md` for Markdown) | 3 |
-| `POST /api/scans/:scanId/reanalyze` | Re-run AI for selected dependencies | 3 |
+| `GET /api/scans/:scanId/report` | Consolidated report. `?format=markdown` returns a `.md` download. 409 until the scan completes | 3 |
+| `POST /api/scans/:scanId/reanalyze` | `{ dependencyIds (1-20), force? }`. Re-runs risk and AI for those upgrades of a completed scan. `force` skips the cache. 202, or 409 while running | 3 |
 | `GET /api/repositories` | Analysed repositories, paginated | 4 |
 | `GET /api/repositories/:repositoryId/scans` | Scan history, paginated | 4 |
 
@@ -165,7 +207,7 @@ Defined in `apps/api/migrations/0001_initial.sql`. Main points:
 | npm dist-tags (and "package not found") | D1 `registry_cache` | `npm:dist-tags:<name>` | 1 hour |
 | One version's manifest (reduced) | D1 `registry_cache` | `npm:version:<name>@<version>` | 7 days (immutable) |
 | Full version list (or a "too large" marker) | D1 `registry_cache` | `npm:versions:<name>` | 1 hour |
-| AI analysis (Phase 3) | KV | SHA-256 of (model, prompt version, package, versions, evidence hashes) | 30 days |
+| AI analysis | D1 `upgrade_analyses` (reused across scans) | `input_hash`: SHA-256 of provider, model, prompt version and the full analysis input | Until the input changes |
 
 GitHub responses are not cached. One scan reads each file once, and evidence is stored per scan in `release_sources`.
 

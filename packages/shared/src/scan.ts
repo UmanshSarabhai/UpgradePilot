@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { AnalysisStatusSchema, RecommendationSchema } from './analysis';
 import {
   DependencyTypeSchema,
   InstalledVersionSourceSchema,
@@ -48,6 +49,8 @@ export const DiscoverySummarySchema = z.object({
   skippedManifests: z.array(z.string()),
   treeTruncated: z.boolean(),
   warnings: z.array(z.string()),
+  /** Config-like files (eslint.config.js, tsconfig.json, ...) the AI may cite as potentially affected. */
+  configFiles: z.array(z.string()).default([]),
 });
 export type DiscoverySummary = z.infer<typeof DiscoverySummarySchema>;
 
@@ -84,6 +87,8 @@ export const DependencyRowSchema = z.object({
   targetVersion: z.string().nullable(),
   upgradeType: UpgradeTypeSchema.nullable(),
   riskLevel: RiskLevelSchema.nullable(),
+  recommendation: RecommendationSchema.nullable(),
+  analysisStatus: AnalysisStatusSchema.nullable(),
   isDeprecated: z.boolean(),
   deprecationMessage: z.string().nullable(),
   registryError: RegistryErrorSchema.nullable(),
@@ -96,8 +101,9 @@ export const DependencyListQuerySchema = z.object({
   upgradeType: UpgradeTypeSchema.optional(),
   dependencyType: DependencyTypeSchema.optional(),
   riskLevel: RiskLevelSchema.optional(),
+  recommendation: RecommendationSchema.optional(),
   q: z.string().trim().max(214).optional(),
-  sort: z.enum(['name', 'upgradeType']).default('name'),
+  sort: z.enum(['name', 'upgradeType', 'riskLevel']).default('name'),
 });
 export type DependencyListQuery = z.infer<typeof DependencyListQuerySchema>;
 
