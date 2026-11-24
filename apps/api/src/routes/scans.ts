@@ -18,13 +18,20 @@ import { enforceHourlyLimit } from '../lib/limits';
 import { jsonResponse, parseJsonBody, parseQuery } from '../lib/validation';
 import { renderMarkdown } from '../modules/report/markdown';
 import { parseGitHubRepoUrl } from '../modules/repository/github-url';
-import type { ScanRecord } from '../modules/storage/scan-store';
+import type { ScanRecord, ScanStore } from '../modules/storage/scan-store';
 import { buildServices } from '../services';
 
 const IdempotencyKeySchema = z.string().trim().min(1).max(200);
 
 function notFound(): AppError {
   return new AppError('NOT_FOUND', 'Scan not found.', 404);
+}
+
+/** The scan if this user owns it. Someone else's scan is reported as not found, so its existence is not revealed. */
+async function ownedScan(store: ScanStore, scanId: string, userId: string): Promise<ScanRecord> {
+  const scan = await store.getScan(scanId);
+  if (!scan || scan.userId !== userId) throw notFound();
+  return scan;
 }
 
 function parseDiscovery(json: string | null): DiscoverySummary | null {
@@ -76,7 +83,12 @@ export const scanRoutes = new Hono<AppEnv>()
       defaultBranch: repository.default_branch,
       primaryLanguage: repository.language,
     });
-    const scan = await store.createScan({ repositoryId, branch, idempotencyKey: keyResult?.data ?? null });
+    const scan = await store.createScan({
+      userId: c.get('user').id,
+      repositoryId,
+      branch,
+      idempotencyKey: keyResult?.data ?? null,
+    });
 
     if (!scan.reused) {
       try {
@@ -91,8 +103,7 @@ export const scanRoutes = new Hono<AppEnv>()
 
   .get('/scans/:scanId', async (c) => {
     const { store } = buildServices(c.env, c.get('logger'), c.get('fetchImpl'));
-    const scan = await store.getScan(c.req.param('scanId'));
-    if (!scan) throw notFound();
+    const scan = await ownedScan(store, c.req.param('scanId'), c.get('user').id);
     return jsonResponse(c, ScanSchema, toScan(scan));
   })
 
@@ -100,7 +111,7 @@ export const scanRoutes = new Hono<AppEnv>()
     const query = { data: parseQuery(c, DependencyListQuerySchema) };
     const { store } = buildServices(c.env, c.get('logger'), c.get('fetchImpl'));
     const scanId = c.req.param('scanId');
-    if (!(await store.getScan(scanId))) throw notFound();
+    await ownedScan(store, scanId, c.get('user').id);
     const { items, total } = await store.listDependencies(scanId, query.data);
     return jsonResponse(c, DependencyListResponseSchema, {
       items,
@@ -111,6 +122,7 @@ export const scanRoutes = new Hono<AppEnv>()
   })
   .get('/scans/:scanId/dependencies/:dependencyId', async (c) => {
     const { store } = buildServices(c.env, c.get('logger'), c.get('fetchImpl'));
+    await ownedScan(store, c.req.param('scanId'), c.get('user').id);
     const detail = await store.dependencyDetail(c.req.param('scanId'), c.req.param('dependencyId'));
     if (!detail) throw new AppError('NOT_FOUND', 'Dependency not found in this scan.', 404);
     return jsonResponse(c, DependencyDetailSchema, detail);
@@ -123,8 +135,7 @@ export const scanRoutes = new Hono<AppEnv>()
     }
     const { store } = buildServices(c.env, c.get('logger'), c.get('fetchImpl'));
     const scanId = c.req.param('scanId');
-    const scan = await store.getScan(scanId);
-    if (!scan) throw notFound();
+    const scan = await ownedScan(store, scanId, c.get('user').id);
     const stored = await store.getReport(scanId);
     if (!stored) {
       throw new AppError('CONFLICT', `The report is not ready. The scan is ${scan.status.toLowerCase()}.`, 409, {
@@ -149,8 +160,7 @@ export const scanRoutes = new Hono<AppEnv>()
     const logger = c.get('logger');
     const { store } = buildServices(c.env, logger, c.get('fetchImpl'));
     const scanId = c.req.param('scanId');
-    const scan = await store.getScan(scanId);
-    if (!scan) throw notFound();
+    const scan = await ownedScan(store, scanId, c.get('user').id);
     if (scan.status !== 'COMPLETED') {
       throw new AppError('CONFLICT', 'Only completed scans can be re-analysed.', 409, { status: scan.status });
     }

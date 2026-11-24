@@ -16,7 +16,7 @@ It runs entirely on the Cloudflare Workers Free plan: Workers, D1, Queues, Worke
 6. **Adds AI analysis (optional).** Workers AI, Claude or OpenAI reads the evidence for risky upgrades. Output is validated against a schema, must cite the sources it was given, and can raise a risk rating but never lower one. Repository text is treated as untrusted.
 7. **Reports.** Safe, review and high-risk groups, an ordered upgrade plan, a migration checklist, and every finding labelled as rule-based, AI, or unverified AI claim.
 
-The dashboard starts scans, shows live progress, filters and searches dependencies, opens the full evidence for any upgrade, re-runs AI analysis, and keeps scan history.
+Sign-in is with Google (any Google account), and each user sees only their own scans. The dashboard starts scans, shows live progress, filters and searches dependencies, opens the full evidence for any upgrade, re-runs AI analysis, and keeps scan history.
 
 ## How it works
 
@@ -71,7 +71,7 @@ npm install
 cp apps/api/.dev.vars.example apps/api/.dev.vars
 ```
 
-Optional: put a GitHub token in `apps/api/.dev.vars` as `GITHUB_TOKEN`. It raises the GitHub limit from 60 to 5,000 requests an hour.
+Fill in `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` and `AUTH_SECRET` in `apps/api/.dev.vars` (see [Google sign-in setup](docs/DEPLOYMENT.md#5-set-up-google-sign-in)); the app requires sign-in. Optional: add `GITHUB_TOKEN` to raise the GitHub limit from 60 to 5,000 requests an hour.
 
 ```bash
 npm run db:migrate:local -w @upgradepilot/api

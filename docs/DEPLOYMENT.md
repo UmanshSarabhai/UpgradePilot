@@ -58,7 +58,35 @@ For OpenAI, set `"AI_PROVIDER": "openai"`, add `"AI_MODEL"` with the model name,
 npx wrangler secret put OPENAI_API_KEY --cwd apps/api
 ```
 
-## 5. Deploy
+## 5. Set up Google sign-in
+
+The whole app requires signing in with a Google account, and each user sees only their own scans.
+
+In the Google Cloud console (Google Auth Platform):
+
+1. **Clients → Create client**, type **Web application**.
+   - Authorized JavaScript origins: `https://upgradepilot.<your-subdomain>.workers.dev`, `http://localhost:8787`, `http://localhost:3000`.
+   - Authorized redirect URIs: the same three origins followed by `/api/auth/google/callback`.
+2. **Data access:** add only `openid`, `.../auth/userinfo.email` and `.../auth/userinfo.profile`. These are non-sensitive, so no Google review is needed.
+3. **Audience:** External. While the status is **Testing**, only listed **Test users** can sign in. Use **Publish app** to let anyone sign in.
+
+Then store the client and a signing secret in Cloudflare (paste each value when asked):
+
+```bash
+npx wrangler secret put GOOGLE_CLIENT_ID --cwd apps/api
+```
+
+```bash
+npx wrangler secret put GOOGLE_CLIENT_SECRET --cwd apps/api
+```
+
+```bash
+openssl rand -base64 32 | npx wrangler secret put AUTH_SECRET --cwd apps/api
+```
+
+Without these, the app shows "Google sign-in is not set up on this server yet." The first account to sign in becomes the owner of any scans made before sign-in existed.
+
+## 6. Deploy
 
 ```bash
 npm run deploy
@@ -66,7 +94,7 @@ npm run deploy
 
 This builds the dashboard (`apps/web/out`) and deploys the Worker with it. Wrangler prints the URL, for example `https://upgradepilot.<your-subdomain>.workers.dev`.
 
-## 6. Check it works
+## 7. Check it works
 
 ```bash
 curl https://upgradepilot.<your-subdomain>.workers.dev/api/health

@@ -176,6 +176,14 @@ Upgrades are merged across manifests by package and versions, then grouped: **sa
 | `GET /api/repositories/:repositoryId/scans` | Paginated scan history with headline counts |
 | `GET /api/scans/:scanId/dependencies/:dependencyId` | One dependency with risk details, advisories, AI analysis and evidence excerpts |
 
+## Sign-in and per-user data
+
+- **Google OAuth 2.0 authorization code flow with PKCE**, run by the Worker (`routes/auth.ts`, `modules/auth/google.ts`). `GET /api/auth/google/login` stores state, nonce and the PKCE verifier in a 10-minute signed `__Host-` cookie and redirects to Google with `openid email profile`. The callback checks the state, exchanges the code server to server with the client secret, and checks the ID token's issuer, audience, expiry, nonce and `email_verified`. The token comes straight from Google's token endpoint over TLS, so per OpenID Connect Core 3.1.3.7 its signature check is not needed. Any Google account may sign in.
+- **Sessions**: a random 256-bit token in a `__Host-upgradepilot_session` cookie (`HttpOnly`, `Secure`, `SameSite=Lax`, 30 days). D1 stores only its SHA-256, so a leaked database cannot be replayed. Sign-out deletes the row; the cron purges expired ones.
+- **Protection**: every `/api` route except `/api/health` and `/api/auth/*` requires a session (401 otherwise). State-changing requests from another origin are refused (403), on top of `SameSite` cookies and JSON-only bodies. The static pages are public files but hold no data.
+- **Ownership**: scans have a `user_id`; lists, the dashboard and history are filtered by it, and another user's scan or repository answers 404, so its existence is not revealed. Hourly limits count per user. Scans from before sign-in existed are claimed by the first user who signs in.
+- **Configuration**: `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` and `AUTH_SECRET` are Cloudflare secrets (`.dev.vars` locally). `APP_ORIGIN` is set only for `next dev` on port 3000.
+
 ## Known risks
 
 - **CPU on large repos.** The recursive tree listing for a big monorepo is several MB of JSON. TanStack/query took 25 subrequests and parsed fine in Node, but we have not measured it against the 10 ms Free limit in production. If it fails there, the fallback is to list only the workspace folders through the Contents API instead of the whole tree.

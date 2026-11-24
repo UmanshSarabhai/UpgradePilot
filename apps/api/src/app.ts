@@ -7,6 +7,7 @@ import type { AppEnv } from './env';
 import { AppError, UpstreamError } from './lib/errors';
 import { createLogger } from './lib/logger';
 import { dashboardRoutes } from './routes/dashboard';
+import { authRoutes, sessionUser } from './routes/auth';
 import { healthRoutes } from './routes/health';
 import { repositoryRoutes } from './routes/repositories';
 import { scanRoutes } from './routes/scans';
@@ -47,7 +48,24 @@ export function createApp(options: AppOptions = {}) {
     }),
   );
 
+  // Cross-site writes are refused (on top of SameSite cookies and JSON-only bodies), and every route except
+  // health and sign-in needs a session.
+  app.use('/api/*', async (c, next) => {
+    if (!['GET', 'HEAD', 'OPTIONS'].includes(c.req.method)) {
+      const origin = c.req.header('origin');
+      if (origin && origin !== new URL(c.req.url).origin && origin !== c.env.APP_ORIGIN) {
+        throw new AppError('FORBIDDEN', 'Cross-site requests are not allowed.', 403);
+      }
+    }
+    if (c.req.path === '/api/health' || c.req.path.startsWith('/api/auth/')) return next();
+    const user = await sessionUser(c);
+    if (!user) throw new AppError('UNAUTHENTICATED', 'Sign in to continue.', 401);
+    c.set('user', user);
+    return next();
+  });
+
   app.route('/api', healthRoutes);
+  app.route('/api', authRoutes);
   app.route('/api', repositoryRoutes);
   app.route('/api', scanRoutes);
   app.route('/api', dashboardRoutes);

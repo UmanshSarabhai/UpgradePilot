@@ -3,8 +3,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/app';
 import { parseGitHubRepoUrl } from '../src/modules/repository/github-url';
 
-// The inspect route records one rate-limit count in D1; this stand-in accepts it.
-const fakeDb = { prepare: () => ({ bind: () => ({ first: async () => ({ count: 1 }) }) }) };
+// Stand-in D1: every lookup returns this row, which serves as both the signed-in user (session lookup)
+// and the rate-limit counter.
+const fakeDb = {
+  prepare: () => ({ bind: () => ({ first: async () => ({ count: 1, id: 'user-1', email: 'dev@example.com', name: null }) }) }),
+};
 const env = { LOG_LEVEL: 'error', DB: fakeDb } as unknown as Env;
 
 const repoJson = {
@@ -40,7 +43,11 @@ function stubGitHub(routes: Record<string, () => Response>) {
 function inspect(body: unknown) {
   return createApp().request(
     '/api/repositories/inspect',
-    { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) },
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie: '__Host-upgradepilot_session=test-token' },
+      body: JSON.stringify(body),
+    },
     env,
   );
 }

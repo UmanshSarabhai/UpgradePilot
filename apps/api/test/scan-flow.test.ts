@@ -15,7 +15,9 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { getPlatformProxy } from 'wrangler';
 import { createApp } from '../src/app';
 import type { ScanMessage } from '../src/env';
+import { sha256Hex } from '../src/lib/hash';
 import { createLogger } from '../src/lib/logger';
+import { createScanStore } from '../src/modules/storage/scan-store';
 import { buildServices } from '../src/services';
 
 /*
@@ -103,8 +105,17 @@ const fakeAi = {
 } as unknown as Ai;
 
 let overrides: Record<string, () => Response> = {};
-const fakeFetch: typeof fetch = async (input) => {
+/** What the fake Google token endpoint received, and the ID token claims it answers with. */
+const tokenRequests: URLSearchParams[] = [];
+let idTokenClaims: Record<string, unknown> = {};
+const b64url = (text: string) => btoa(text).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
+const fakeFetch: typeof fetch = async (input, init) => {
   const url = new URL(typeof input === 'string' || input instanceof URL ? input : input.url);
+  if (url.host + url.pathname === 'oauth2.googleapis.com/token') {
+    tokenRequests.push(new URLSearchParams(String(init?.body)));
+    return json({ id_token: `${b64url('{"alg":"RS256"}')}.${b64url(JSON.stringify(idTokenClaims))}.sig` });
+  }
   const route = overrides[url.host + url.pathname] ?? upstream[url.host + url.pathname];
   return route ? route() : json({ message: 'Not Found' }, { status: 404 });
 };
@@ -121,8 +132,21 @@ let env: Env;
 const app = createApp({ fetch: fakeFetch });
 const logger = createLogger('error');
 
-function request(path: string, init: RequestInit = {}, withEnv: Env = env) {
-  return app.request(path, init, withEnv);
+/** Session cookie of the default signed-in test user, set in beforeEach. */
+let sessionCookie = '';
+
+async function signIn(sub: string, email: string): Promise<string> {
+  const store = createScanStore(env.DB);
+  const user = await store.upsertGoogleUser({ sub, email, name: null });
+  const token = `token-${sub}`;
+  await store.createSession(await sha256Hex(token), user.id, '2999-01-01T00:00:00.000Z');
+  return `__Host-upgradepilot_session=${token}`;
+}
+
+function request(path: string, init: RequestInit = {}, withEnv: Env = env, cookie: string = sessionCookie) {
+  const headers = new Headers(init.headers);
+  if (cookie && !headers.has('cookie')) headers.set('cookie', cookie);
+  return app.request(path, { ...init, headers }, withEnv);
 }
 
 function createScan(body: unknown, headers: Record<string, string> = {}, withEnv: Env = env) {
@@ -154,6 +178,9 @@ beforeAll(async () => {
     AI: fakeAi,
     AI_PROVIDER: 'workers-ai',
     AI_MAX_ANALYSES_PER_SCAN: '10',
+    GOOGLE_CLIENT_ID: 'test-client',
+    GOOGLE_CLIENT_SECRET: 'test-secret',
+    AUTH_SECRET: 'test-auth-secret-0123456789abcdef',
     LOG_LEVEL: 'error',
   } as unknown as Env;
   const migrations = join(__dirname, '..', 'migrations');
@@ -177,10 +204,94 @@ beforeEach(async () => {
   aiCalls.length = 0;
   aiAnswer = goodAiAnswer;
   await env.DB.batch(
-    ['release_sources', 'upgrade_analyses', 'dependencies', 'scans', 'repositories', 'registry_cache', 'rate_counters'].map((t) =>
-      env.DB.prepare(`DELETE FROM ${t}`),
-    ),
+    [
+      'release_sources',
+      'upgrade_analyses',
+      'dependencies',
+      'scans',
+      'repositories',
+      'registry_cache',
+      'rate_counters',
+      'sessions',
+      'users',
+    ].map((t) => env.DB.prepare(`DELETE FROM ${t}`)),
   );
+  tokenRequests.length = 0;
+  sessionCookie = await signIn('google-owner', 'owner@example.com');
+});
+
+describe('google sign-in', () => {
+  it('signs in through Google with PKCE, then signs out', async () => {
+    const login = await request('/api/auth/google/login?returnTo=%2Fscan%2F%3Fid%3Dabc', {}, env, '');
+    expect(login.status).toBe(302);
+    const google = new URL(login.headers.get('location') ?? '');
+    expect(`${google.origin}${google.pathname}`).toBe('https://accounts.google.com/o/oauth2/v2/auth');
+    expect(google.searchParams.get('redirect_uri')).toBe('http://localhost/api/auth/google/callback');
+    expect(google.searchParams.get('code_challenge_method')).toBe('S256');
+    expect(google.searchParams.get('scope')).toBe('openid email profile');
+    const flowCookie = (login.headers.get('set-cookie') ?? '').split(';')[0] ?? '';
+    expect(flowCookie.startsWith('__Host-upgradepilot_oauth=')).toBe(true);
+
+    idTokenClaims = {
+      iss: 'https://accounts.google.com',
+      aud: 'test-client',
+      sub: 'google-new',
+      email: 'new@example.com',
+      email_verified: true,
+      name: 'New User',
+      exp: Math.floor(Date.now() / 1000) + 600,
+      nonce: google.searchParams.get('nonce'),
+    };
+    const callback = await request(
+      `/api/auth/google/callback?code=c0de&state=${google.searchParams.get('state')}`,
+      { headers: { cookie: flowCookie } },
+      env,
+      '',
+    );
+    expect(callback.status).toBe(302);
+    expect(callback.headers.get('location')).toBe('/scan/?id=abc');
+    expect(tokenRequests[0]?.get('code_verifier')).toBeTruthy();
+    expect(tokenRequests[0]?.get('client_secret')).toBe('test-secret');
+    const session = callback.headers.getSetCookie().find((c) => c.startsWith('__Host-upgradepilot_session=')) ?? '';
+    expect(session).toContain('HttpOnly');
+    expect(session).toContain('Secure');
+    const cookie = session.split(';')[0] ?? '';
+
+    const me = await request('/api/auth/me', {}, env, cookie);
+    expect(await me.json()).toEqual({ user: { id: expect.any(String), email: 'new@example.com', name: 'New User' } });
+
+    const logout = await request(
+      '/api/auth/logout',
+      { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' },
+      env,
+      cookie,
+    );
+    expect(logout.status).toBe(204);
+    expect((await request('/api/auth/me', {}, env, cookie)).status).toBe(401);
+  });
+
+  it('rejects a callback whose state does not match the browser cookie', async () => {
+    const login = await request('/api/auth/google/login', {}, env, '');
+    const flowCookie = (login.headers.get('set-cookie') ?? '').split(';')[0] ?? '';
+    const callback = await request('/api/auth/google/callback?code=c0de&state=forged', { headers: { cookie: flowCookie } }, env, '');
+    expect(callback.headers.get('location')).toBe('/?auth_error=invalid_state');
+    expect(tokenRequests).toHaveLength(0);
+  });
+
+  it('keeps scans private, requires a session, and refuses cross-site writes', async () => {
+    const { scanId } = CreateScanResponseSchema.parse(
+      await (await createScan({ url: 'https://github.com/acme/shop', branch: 'main' })).json(),
+    );
+    const other = await signIn('google-other', 'other@example.com');
+    expect((await request(`/api/scans/${scanId}`, {}, env, other)).status).toBe(404);
+    expect(DashboardResponseSchema.parse(await (await request('/api/dashboard', {}, env, other)).json()).recentScans).toEqual([]);
+    expect((await request(`/api/scans/${scanId}`)).status).toBe(200);
+
+    expect((await request('/api/dashboard', {}, env, '')).status).toBe(401);
+    expect((await request('/api/health', {}, env, '')).status).toBe(200);
+    const crossSite = await createScan({ url: 'https://github.com/acme/shop', branch: 'dev' }, { origin: 'https://evil.example' });
+    expect(crossSite.status).toBe(403);
+  });
 });
 
 describe('scan pipeline', () => {

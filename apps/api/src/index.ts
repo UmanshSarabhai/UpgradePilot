@@ -52,6 +52,7 @@ export default {
     }
     await store.purgeExpiredCache(Date.now());
     await store.purgeOldQuotaWindows(Date.now());
+    await store.purgeExpiredSessions();
     if (stale.length > 0) logger.info('re-enqueued stale scans', { count: stale.length });
   },
 } satisfies ExportedHandler<Env, unknown>;

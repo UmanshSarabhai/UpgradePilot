@@ -25,7 +25,9 @@ const HOURLY_LIMITS = {
 export async function enforceHourlyLimit(c: Context<AppEnv>, store: ScanStore, name: keyof typeof HOURLY_LIMITS): Promise<void> {
   const { variable, fallback } = HOURLY_LIMITS[name];
   const limit = intVar((c.env as unknown as Record<string, string | undefined>)[variable], fallback);
-  const client = (await sha256Hex(c.req.header('cf-connecting-ip') ?? 'local')).slice(0, 16);
+  // Signed-in users are limited per account; the IP hash is the fallback for routes without a user.
+  const user = c.get('user');
+  const client = user ? `user:${user.id}` : (await sha256Hex(c.req.header('cf-connecting-ip') ?? 'local')).slice(0, 16);
 
   for (const [key, max] of [
     [`${name}:client:${client}`, Math.max(1, Math.ceil(limit / 4))],

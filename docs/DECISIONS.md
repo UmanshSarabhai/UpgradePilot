@@ -189,3 +189,18 @@ Smaller calls made while building, in order.
 | Deployment | Deploy from here; document and dry-run | Documented in `DEPLOYMENT.md` and verified with `wrangler deploy --dry-run` (430 KB gzipped). The real deploy needs the owner's Cloudflare login. |
 | Security headers | None; CSP | `_headers` for static pages (CSP with `'unsafe-inline'` scripts, which the Next.js export needs), Hono `secureHeaders()` for API responses. Checked in the browser: no CSP violations. |
 | First deploy (24 Nov 2026) | | Deployed to `https://upgradepilot.upgradepilot-api.workers.dev` from this machine after the owner approved `wrangler login` in their browser. D1 created in APAC, queue and cron attached, Worker startup 36 ms. A live scan of `vercel/ms` completed in about a minute with real Workers AI: 3 analyses, cited sources, one honest "inconclusive", one upgrade skipped for lack of release text. |
+
+### Google sign-in (24 Nov 2026)
+
+| Situation | Options considered | Chosen, and why |
+| --- | --- | --- |
+| Who may sign in, what is protected, who sees what | Asked the owner | Any Google account; the whole app requires sign-in; each user sees only their own scans. |
+| Flow | Google Identity Services in the browser; server-side code flow | Server-side authorization code flow with PKCE. No Google token reaches the browser, the client secret stays in a Cloudflare secret, and no library is needed. |
+| ID token signature | Fetch Google's JWKS and verify; rely on the TLS back channel | TLS back channel, as OpenID Connect Core 3.1.3.7 allows for tokens received directly from the token endpoint. Claims are still checked. Avoids a JWKS fetch and RSA verification on every sign-in. |
+| Session storage | Signed stateless cookie (JWT); random token with a D1 row | Random token, hash in D1: sign-out and revocation work immediately, and nothing user-identifying sits in the cookie. |
+| Flow state between redirect and callback | D1 row; signed cookie | Hono's HMAC-signed cookie (`AUTH_SECRET`), 10 minutes, `__Host-` prefix, `SameSite=Lax` so it survives Google's redirect. No table needed. |
+| Old scans with no owner | Leave them hidden; owner email in config; first user claims | First user to sign in claims them. Keeps the owner's email out of the public repository. |
+| Another user's scan | 403; 404 | 404, so scan IDs cannot be probed. |
+| CSRF | Tokens; Origin check | Origin check on non-GET requests, plus `SameSite=Lax` and the existing JSON-only rule. |
+| Local `next dev` on port 3000 | CORS; APP_ORIGIN | `APP_ORIGIN` sets the redirect URI and the allowed Origin when the dev server proxies to the Worker. Cookies are shared across localhost ports. |
+| Sign-in UI | Separate route; gate in providers | A gate in the providers shows the sign-in screen until `/api/auth/me` succeeds, and any 401 during use returns to it. Built by a subagent in parallel against the shared auth contract. |

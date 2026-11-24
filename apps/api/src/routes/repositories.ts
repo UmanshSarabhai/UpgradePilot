@@ -24,15 +24,15 @@ export const repositoryRoutes = new Hono<AppEnv>().post('/repositories/inspect',
   .get('/repositories', async (c) => {
     const { page, pageSize } = parseQuery(c, PaginationQuerySchema);
     const { store } = buildServices(c.env, c.get('logger'), c.get('fetchImpl'));
-    const { items, total } = await store.listRepositories(page, pageSize);
+    const { items, total } = await store.listRepositories(c.get('user').id, page, pageSize);
     return jsonResponse(c, RepositoryListResponseSchema, { items, total, page, pageSize });
   })
 
   .get('/repositories/:repositoryId/scans', async (c) => {
     const { page, pageSize } = parseQuery(c, PaginationQuerySchema);
     const { store } = buildServices(c.env, c.get('logger'), c.get('fetchImpl'));
-    const repository = await store.getRepository(c.req.param('repositoryId'));
+    const repository = await store.getRepository(c.req.param('repositoryId'), c.get('user').id);
     if (!repository) throw new AppError('NOT_FOUND', 'Repository not found.', 404);
-    const { items, total } = await store.listScans(repository.id, page, pageSize);
+    const { items, total } = await store.listScans(repository.id, c.get('user').id, page, pageSize);
     return jsonResponse(c, ScanHistoryResponseSchema, { repository, items, total, page, pageSize });
   });

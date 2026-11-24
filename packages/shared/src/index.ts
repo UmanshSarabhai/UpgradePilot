@@ -5,3 +5,4 @@ export * from './scan';
 export * from './analysis';
 export * from './report';
 export * from './dashboard';
+export * from './auth';

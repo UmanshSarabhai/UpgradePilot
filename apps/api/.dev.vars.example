@@ -7,3 +7,11 @@ AI_PROVIDER=none
 # ANTHROPIC_API_KEY=
 # OPENAI_API_KEY=
 # AI_MODEL=
+
+# Google sign-in (required: the whole app needs a login). From Google Cloud console > Credentials > OAuth client.
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+# Any long random string, e.g. the output of: openssl rand -base64 32
+AUTH_SECRET=
+# Only when using `npm run dev:web` (Next dev server on port 3000); leave unset for http://localhost:8787.
+# APP_ORIGIN=http://localhost:3000

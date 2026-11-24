@@ -26,6 +26,8 @@ const FINISHED = `('COMPLETED', 'FAILED')`;
 
 export interface ScanRecord {
   id: string;
+  /** Owner. null only for scans made before sign-in existed and not yet claimed. */
+  userId: string | null;
   repositoryId: string;
   owner: string;
   name: string;
@@ -239,6 +241,7 @@ function toRepositoryInfo(row: RepositoryRow): RepositoryInfo {
 
 interface ScanRow {
   id: string;
+  user_id: string | null;
   repository_id: string;
   owner: string;
   name: string;
@@ -282,7 +285,7 @@ interface DependencyDbRow {
 }
 
 const SCAN_SELECT = `
-  SELECT s.id, s.repository_id, r.owner, r.name, r.github_url, s.branch, s.commit_sha, s.status, s.progress,
+  SELECT s.id, s.user_id, s.repository_id, r.owner, r.name, r.github_url, s.branch, s.commit_sha, s.status, s.progress,
          s.current_stage, s.attempt_count, s.step_seq, s.error_message, s.discovery_summary,
          s.created_at, s.started_at, s.completed_at
   FROM scans s JOIN repositories r ON r.id = s.repository_id`;
@@ -290,6 +293,7 @@ const SCAN_SELECT = `
 function toScanRecord(row: ScanRow): ScanRecord {
   return {
     id: row.id,
+    userId: row.user_id,
     repositoryId: row.repository_id,
     owner: row.owner,
     name: row.name,
@@ -367,6 +371,7 @@ export function createScanStore(db: D1Database, now: () => string = () => new Da
      * already running for this repository and branch.
      */
     async createScan(input: {
+      userId: string;
       repositoryId: string;
       branch: string;
       idempotencyKey: string | null;
@@ -374,20 +379,24 @@ export function createScanStore(db: D1Database, now: () => string = () => new Da
       const timestamp = now();
       const inserted = await db
         .prepare(
-          `INSERT INTO scans (id, repository_id, branch, idempotency_key, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING RETURNING id, status`,
+          `INSERT INTO scans (id, user_id, repository_id, branch, idempotency_key, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING RETURNING id, status`,
         )
-        .bind(crypto.randomUUID(), input.repositoryId, input.branch, input.idempotencyKey, timestamp, timestamp)
+        .bind(crypto.randomUUID(), input.userId, input.repositoryId, input.branch, input.idempotencyKey, timestamp, timestamp)
         .first<{ id: string; status: ScanStatus }>();
       if (inserted) return { ...inserted, reused: false };
 
       if (input.idempotencyKey) {
         const existing = await db
-          .prepare('SELECT id, status, repository_id, branch FROM scans WHERE idempotency_key = ?')
+          .prepare('SELECT id, status, user_id, repository_id, branch FROM scans WHERE idempotency_key = ?')
           .bind(input.idempotencyKey)
-          .first<{ id: string; status: ScanStatus; repository_id: string; branch: string }>();
+          .first<{ id: string; status: ScanStatus; user_id: string | null; repository_id: string; branch: string }>();
         if (existing) {
-          if (existing.repository_id !== input.repositoryId || existing.branch !== input.branch) {
+          if (
+            existing.user_id !== input.userId ||
+            existing.repository_id !== input.repositoryId ||
+            existing.branch !== input.branch
+          ) {
             throw new AppError('CONFLICT', 'This Idempotency-Key was already used for a different scan.', 409);
           }
           return { id: existing.id, status: existing.status, reused: true };
@@ -395,8 +404,11 @@ export function createScanStore(db: D1Database, now: () => string = () => new Da
       }
 
       const active = await db
-        .prepare(`SELECT id, status FROM scans WHERE repository_id = ? AND branch = ? AND status NOT IN ${FINISHED}`)
-        .bind(input.repositoryId, input.branch)
+        .prepare(
+          `SELECT id, status FROM scans
+           WHERE repository_id = ? AND branch = ? AND user_id = ? AND status NOT IN ${FINISHED}`,
+        )
+        .bind(input.repositoryId, input.branch, input.userId)
         .first<{ id: string; status: ScanStatus }>();
       if (active) return { ...active, reused: true };
       throw new AppError('CONFLICT', 'The scan could not be created. Try again.', 409);
@@ -1042,17 +1054,23 @@ export function createScanStore(db: D1Database, now: () => string = () => new Da
     },
 
     /** Repositories, most recently updated first, each with its newest scan. */
-    async listRepositories(page: number, pageSize: number): Promise<{ items: RepositoryListItem[]; total: number }> {
+    async listRepositories(userId: string, page: number, pageSize: number): Promise<{ items: RepositoryListItem[]; total: number }> {
       const [rows, count] = await db.batch([
         db
           .prepare(
             `SELECT r.id, r.owner, r.name, r.github_url, r.default_branch, r.primary_language,
-                    (SELECT COUNT(*) FROM scans WHERE repository_id = r.id) AS scan_count,
-                    (SELECT id FROM scans WHERE repository_id = r.id ORDER BY created_at DESC LIMIT 1) AS last_scan_id
-             FROM repositories r ORDER BY r.updated_at DESC LIMIT ? OFFSET ?`,
+                    (SELECT COUNT(*) FROM scans WHERE repository_id = r.id AND user_id = ?1) AS scan_count,
+                    (SELECT id FROM scans WHERE repository_id = r.id AND user_id = ?1 ORDER BY created_at DESC LIMIT 1) AS last_scan_id
+             FROM repositories r
+             WHERE EXISTS (SELECT 1 FROM scans WHERE repository_id = r.id AND user_id = ?1)
+             ORDER BY r.updated_at DESC LIMIT ?2 OFFSET ?3`,
           )
-          .bind(pageSize, (page - 1) * pageSize),
-        db.prepare('SELECT COUNT(*) AS total FROM repositories'),
+          .bind(userId, pageSize, (page - 1) * pageSize),
+        db
+          .prepare(
+            'SELECT COUNT(*) AS total FROM repositories r WHERE EXISTS (SELECT 1 FROM scans WHERE repository_id = r.id AND user_id = ?)',
+          )
+          .bind(userId),
       ]);
       const repositories = (rows?.results ?? []) as Array<RepositoryRow & { scan_count: number; last_scan_id: string | null }>;
       const lastScanIds = repositories.map((r) => r.last_scan_id).filter((id): id is string => id !== null);
@@ -1074,20 +1092,29 @@ export function createScanStore(db: D1Database, now: () => string = () => new Da
       };
     },
 
-    async getRepository(id: string): Promise<RepositoryInfo | null> {
+    /** A repository the user has scanned; null otherwise, so others' repositories look like they do not exist. */
+    async getRepository(id: string, userId: string): Promise<RepositoryInfo | null> {
       const row = await db
-        .prepare('SELECT id, owner, name, github_url, default_branch, primary_language FROM repositories WHERE id = ?')
-        .bind(id)
+        .prepare(
+          `SELECT id, owner, name, github_url, default_branch, primary_language FROM repositories r
+           WHERE id = ? AND EXISTS (SELECT 1 FROM scans WHERE repository_id = r.id AND user_id = ?)`,
+        )
+        .bind(id, userId)
         .first<RepositoryRow>();
       return row ? toRepositoryInfo(row) : null;
     },
 
-    async listScans(repositoryId: string, page: number, pageSize: number): Promise<{ items: ScanSummary[]; total: number }> {
+    async listScans(
+      repositoryId: string,
+      userId: string,
+      page: number,
+      pageSize: number,
+    ): Promise<{ items: ScanSummary[]; total: number }> {
       const [rows, count] = await db.batch([
         db
-          .prepare(`${SCAN_SUMMARY_SELECT} WHERE s.repository_id = ? ORDER BY s.created_at DESC LIMIT ? OFFSET ?`)
-          .bind(repositoryId, pageSize, (page - 1) * pageSize),
-        db.prepare('SELECT COUNT(*) AS total FROM scans WHERE repository_id = ?').bind(repositoryId),
+          .prepare(`${SCAN_SUMMARY_SELECT} WHERE s.repository_id = ? AND s.user_id = ? ORDER BY s.created_at DESC LIMIT ? OFFSET ?`)
+          .bind(repositoryId, userId, pageSize, (page - 1) * pageSize),
+        db.prepare('SELECT COUNT(*) AS total FROM scans WHERE repository_id = ? AND user_id = ?').bind(repositoryId, userId),
       ]);
       return {
         items: ((rows?.results ?? []) as ScanSummaryRow[]).map(toScanSummary),
@@ -1096,20 +1123,21 @@ export function createScanStore(db: D1Database, now: () => string = () => new Da
     },
 
     /** Totals over the newest completed scan of each repository, plus the most recent scans. */
-    async dashboard(recentLimit: number) {
+    async dashboard(userId: string, recentLimit: number) {
       const [totals, recent] = await db.batch([
         db.prepare(
           `WITH latest AS (
              SELECT s.id FROM scans s
-             WHERE s.status = 'COMPLETED' AND s.created_at = (
-               SELECT MAX(created_at) FROM scans WHERE repository_id = s.repository_id AND status = 'COMPLETED'))
-           SELECT (SELECT COUNT(*) FROM repositories) AS repositories,
+             WHERE s.user_id = ?1 AND s.status = 'COMPLETED' AND s.created_at = (
+               SELECT MAX(created_at) FROM scans
+               WHERE repository_id = s.repository_id AND user_id = ?1 AND status = 'COMPLETED'))
+           SELECT (SELECT COUNT(DISTINCT repository_id) FROM scans WHERE user_id = ?1) AS repositories,
                   COUNT(d.id) AS dependencies,
                   COALESCE(SUM(d.upgrade_type IN ${UPGRADES}), 0) AS outdated,
                   COALESCE(SUM(d.upgrade_type IN ${UPGRADES} AND d.risk_level = 'high'), 0) AS high_risk
            FROM latest l LEFT JOIN dependencies d ON d.scan_id = l.id`,
-        ),
-        db.prepare(`${SCAN_SUMMARY_SELECT} ORDER BY s.created_at DESC LIMIT ?`).bind(recentLimit),
+        ).bind(userId),
+        db.prepare(`${SCAN_SUMMARY_SELECT} WHERE s.user_id = ? ORDER BY s.created_at DESC LIMIT ?`).bind(userId, recentLimit),
       ]);
       const row = ((totals?.results ?? []) as Array<{ repositories: number; dependencies: number; outdated: number; high_risk: number }>)[0];
       return {
@@ -1168,6 +1196,51 @@ export function createScanStore(db: D1Database, now: () => string = () => new Da
 
     async purgeOldQuotaWindows(nowMs: number): Promise<void> {
       await db.prepare('DELETE FROM rate_counters WHERE window_start < ?').bind(Math.floor(nowMs / 1000) - 2 * 86_400).run();
+    },
+
+    /** Creates or refreshes the user for a Google account. The very first user claims scans made before sign-in. */
+    async upsertGoogleUser(input: { sub: string; email: string; name: string | null }) {
+      const timestamp = now();
+      const user = await db
+        .prepare(
+          `INSERT INTO users (id, google_sub, email, name, created_at, last_login_at) VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+           ON CONFLICT (google_sub) DO UPDATE SET email = excluded.email, name = excluded.name, last_login_at = excluded.last_login_at
+           RETURNING id, email, name`,
+        )
+        .bind(crypto.randomUUID(), input.sub, input.email, input.name, timestamp)
+        .first<{ id: string; email: string; name: string | null }>();
+      if (!user) throw new Error('User upsert returned no row');
+      await db
+        .prepare(
+          `UPDATE scans SET user_id = ?1 WHERE user_id IS NULL
+             AND (SELECT COUNT(*) FROM users) = 1 AND EXISTS (SELECT 1 FROM users WHERE id = ?1)`,
+        )
+        .bind(user.id)
+        .run();
+      return user;
+    },
+
+    async createSession(tokenHash: string, userId: string, expiresAt: string): Promise<void> {
+      await db.prepare('INSERT INTO sessions (id, user_id, expires_at) VALUES (?, ?, ?)').bind(tokenHash, userId, expiresAt).run();
+    },
+
+    /** The signed-in user for a session token hash, if the session exists and has not expired. */
+    async sessionUser(tokenHash: string): Promise<{ id: string; email: string; name: string | null } | null> {
+      return db
+        .prepare(
+          `SELECT u.id, u.email, u.name FROM sessions s JOIN users u ON u.id = s.user_id
+           WHERE s.id = ? AND s.expires_at > ?`,
+        )
+        .bind(tokenHash, now())
+        .first<{ id: string; email: string; name: string | null }>();
+    },
+
+    async deleteSession(tokenHash: string): Promise<void> {
+      await db.prepare('DELETE FROM sessions WHERE id = ?').bind(tokenHash).run();
+    },
+
+    async purgeExpiredSessions(): Promise<void> {
+      await db.prepare('DELETE FROM sessions WHERE expires_at <= ?').bind(now()).run();
     },
   };
 }
