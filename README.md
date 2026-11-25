@@ -4,7 +4,7 @@ UpgradePilot analyses the npm dependencies of a public GitHub repository and tel
 
 It runs entirely on the Cloudflare Workers Free plan: Workers, D1, Queues, Workers AI and static assets.
 
-**Live demo:** https://upgradepilot.upgradepilot-api.workers.dev (shared demo with hourly limits). See also [an example report](docs/example-report.md) from a real scan of `vercel/ms`.
+**Live demo:** https://upgradepilot.umansh.workers.dev (shared demo with hourly limits). See also [an example report](docs/example-report.md) from a real scan of `vercel/ms`.
 
 ## What it does
 
