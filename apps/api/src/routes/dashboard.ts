@@ -6,7 +6,10 @@ import { jsonResponse } from '../lib/validation';
 import { buildServices } from '../services';
 
 const RECENT_SCANS = 10;
-/** The dashboard is polled; caching per user and isolate caps its D1 reads at one query batch per window. */
+/**
+ * The dashboard is polled only while a scan is active; caching per user and isolate caps those D1 reads at one query
+ * batch per window. A response with no active scan is never served from the cache, so a scan started since then shows up.
+ */
 const CACHE_MS = 10_000;
 const MAX_CACHED_USERS = 500;
 const cache = new Map<string, { value: DashboardResponse; expires: number }>();
@@ -14,7 +17,8 @@ const cache = new Map<string, { value: DashboardResponse; expires: number }>();
 export const dashboardRoutes = new Hono<AppEnv>().get('/dashboard', async (c) => {
   const userId = c.get('user').id;
   let entry = cache.get(userId);
-  if (!entry || entry.expires <= Date.now()) {
+  const polling = entry?.value.recentScans.some((scan) => scan.status !== 'COMPLETED' && scan.status !== 'FAILED');
+  if (!entry || entry.expires <= Date.now() || !polling) {
     const { store } = buildServices(c.env, c.get('logger'), c.get('fetchImpl'));
     const days = retentionDays(c.env);
     const data = await store.dashboard(userId, RECENT_SCANS);

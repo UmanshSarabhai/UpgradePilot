@@ -61,11 +61,12 @@ export function createHttpClient(options: HttpClientOptions): HttpClient {
 
   async function fetchFollowingRedirects(url: URL, headers: Record<string, string>, payload: Payload): Promise<Response> {
     let current = url;
+    let hopPayload = payload;
     for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
       assertAllowed(current);
       const response = await doFetch(current.toString(), {
-        method: payload.method,
-        body: payload.body,
+        method: hopPayload.method,
+        body: hopPayload.body,
         headers,
         redirect: 'manual',
         signal: AbortSignal.timeout(timeoutMs),
@@ -74,6 +75,8 @@ export function createHttpClient(options: HttpClientOptions): HttpClient {
       if (!REDIRECT_STATUSES.has(response.status) || !location) return response;
       await response.body?.cancel();
       current = new URL(location, current);
+      // 301/302/303 turn the next request into a GET without a body; 307/308 keep the method and body.
+      if (response.status !== 307 && response.status !== 308) hopPayload = { method: 'GET' };
     }
     throw new UpstreamError('http_error', 'Too many redirects', { url: url.toString() });
   }
@@ -136,7 +139,7 @@ export function createHttpClient(options: HttpClientOptions): HttpClient {
   }
 
   function getText(url: string, requestOptions?: RequestOptions): Promise<string> {
-    const key = `${url}\n${JSON.stringify(requestOptions?.headers ?? {})}`;
+    const key = `${url}\n${JSON.stringify(requestOptions?.headers ?? {})}\n${requestOptions?.maxBytes ?? defaultMaxBytes}`;
     const existing = inflight.get(key);
     if (existing) return existing;
     const promise = request(url, requestOptions).finally(() => inflight.delete(key));

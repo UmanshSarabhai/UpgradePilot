@@ -1,4 +1,4 @@
-import { type Advisory, DiscoverySummarySchema } from '@upgradepilot/shared';
+import { type Advisory, DiscoverySummarySchema, type Report } from '@upgradepilot/shared';
 import { UpstreamError } from '../../lib/errors';
 import { sha256Hex } from '../../lib/hash';
 import type { HttpClient } from '../../lib/http';
@@ -284,7 +284,7 @@ export function createStages(deps: StageDependencies): StageHandlers {
       });
       return {
         update: { status: 'COMPLETED', progress: 100, currentStage: 'Completed', completedAt: now() },
-        writes: [store.saveReport(scan.id, JSON.stringify(report))],
+        writes: [store.saveReport(scan.id, serializeReport(report))],
       };
     },
   };
@@ -530,3 +530,21 @@ function parseDiscovery(json: string | null) {
   }
 }
 
+
+/** D1 caps a row at 2 MB. Leaves headroom for the rest of the scan row. */
+const REPORT_MAX_BYTES = 1_900_000;
+
+/**
+ * The report JSON for the scan row. When it is too large, evidence links are left out: the dependency detail
+ * endpoint still serves them from the release_sources rows.
+ */
+function serializeReport(report: Report): string {
+  const json = JSON.stringify(report);
+  if (new TextEncoder().encode(json).length <= REPORT_MAX_BYTES) return json;
+  const strip = (entries: Report['groups']['safe']) => entries.map((entry) => ({ ...entry, evidence: [] }));
+  return JSON.stringify({
+    ...report,
+    groups: { safe: strip(report.groups.safe), review: strip(report.groups.review), highRisk: strip(report.groups.highRisk) },
+    warnings: [...report.warnings, 'Evidence links were left out of this report to fit the size limit. Open a dependency to see them.'],
+  });
+}

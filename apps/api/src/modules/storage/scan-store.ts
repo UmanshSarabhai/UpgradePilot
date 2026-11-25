@@ -1261,7 +1261,18 @@ export function createScanStore(db: D1Database, now: () => string = () => new Da
         .bind(cutoff, limit)
         .all<{ id: string }>();
       const ids = results.map((row) => row.id);
-      if (ids.length === 0) return 0;
+      // Only repositories untouched since the cutoff: a scan request upserts its repository (fresh updated_at)
+      // just before it creates the scan, so a purge in between must not delete it. Runs on every call so a
+      // repository kept once is removed by a later run.
+      const purgeRepositories = db
+        .prepare(
+          'DELETE FROM repositories WHERE updated_at < ? AND NOT EXISTS (SELECT 1 FROM scans WHERE scans.repository_id = repositories.id)',
+        )
+        .bind(cutoff);
+      if (ids.length === 0) {
+        await purgeRepositories.run();
+        return 0;
+      }
       const list = ids.map(() => '?').join(', ');
       const ofDeps = `SELECT id FROM dependencies WHERE scan_id IN (${list})`;
       await db.batch([
@@ -1270,7 +1281,7 @@ export function createScanStore(db: D1Database, now: () => string = () => new Da
         db.prepare(`DELETE FROM dependencies WHERE scan_id IN (${list})`).bind(...ids),
         db.prepare(`DELETE FROM rate_counters WHERE key IN (${list})`).bind(...ids.map((id) => `ai-analyses:scan:${id}`)),
         db.prepare(`DELETE FROM scans WHERE id IN (${list})`).bind(...ids),
-        db.prepare('DELETE FROM repositories WHERE NOT EXISTS (SELECT 1 FROM scans WHERE scans.repository_id = repositories.id)'),
+        purgeRepositories,
       ]);
       return ids.length;
     },

@@ -578,7 +578,12 @@ describe('scan pipeline', () => {
     expect(await count('SELECT COUNT(*) AS n FROM repositories')).toBe(1);
 
     await env.DB.prepare('UPDATE scans SET created_at = ? WHERE id = ?').bind(elevenDaysAgo, recent).run();
+    // A repository touched since the cutoff (a scan request is about to use it) is kept.
     expect(await store.purgeExpiredScans(retentionCutoff(10), 25)).toBe(1);
+    expect(await count('SELECT COUNT(*) AS n FROM repositories')).toBe(1);
+
+    await env.DB.prepare('UPDATE repositories SET updated_at = ?').bind(elevenDaysAgo).run();
+    expect(await store.purgeExpiredScans(retentionCutoff(10), 25)).toBe(0);
     expect(await count('SELECT COUNT(*) AS n FROM repositories')).toBe(0);
   });
 

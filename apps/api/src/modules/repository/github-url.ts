@@ -9,8 +9,10 @@ const ALLOWED_HOSTS = new Set(['github.com', 'www.github.com']);
 // GitHub usernames: alphanumeric or single hyphens, max 39 chars, no leading hyphen.
 const OWNER_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
 const REPO_PATTERN = /^[A-Za-z0-9._-]{1,100}$/;
-// Git ref rules, simplified: no "..", no leading "/" or "-", no trailing "/" or ".lock", safe characters only.
-const BRANCH_PATTERN = /^(?![-/])(?!.*\.\.)(?!.*\/\/)(?!.*\/$)(?!.*\.lock$)[A-Za-z0-9._\-/]{1,255}$/;
+// Git check-ref-format rules: no control characters, space, ~ ^ : ? * [ \, no "..", "@{" or "//", no leading "-" or "/",
+// no segment starting with ".", no trailing "/", "." or ".lock", and not "@" alone. The branch is URL-encoded before use.
+const BRANCH_PATTERN =
+  /^(?![-/])(?!@$)(?!.*\.\.)(?!.*@\{)(?!.*\/\/)(?!(?:.*\/)?\.)(?!.*[/.]$)(?!.*\.lock(?:\/|$))[^\x00-\x20\x7f~^:?*[\\]{1,255}$/;
 
 function invalid(message: string): AppError {
   return new AppError('INVALID_REPOSITORY_URL', message, 400);
