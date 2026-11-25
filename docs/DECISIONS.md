@@ -214,3 +214,14 @@ Smaller calls made while building, in order.
 | Brand icons | Image files; inline SVG | Inline SVG for Google's "G" and the GitHub mark (`components/brand.tsx`): the CSP allows only same-origin images, and lucide 1.x has no brand icons. |
 | Consistency across four parallel agents | Let each style freely; shared pieces first | Shared pieces first (theme tokens, `BrandMark`, `IconChip`, badges with icons, `EmptyState` icon) plus one design brief given to all four agents (sign-in and header, dashboard, scan page, report and repositories). |
 | Verification | Trust agent reports; look at it | Built and checked every page in the browser with a local test session: sign-in, dashboard, scan page, detail panel, report, and 375px width (no horizontal scroll). |
+
+### Disabled accounts and data retention (25 Nov 2026)
+
+| Situation | Options considered | Chosen, and why |
+| --- | --- | --- |
+| Blocking a user from the database | Delete the user; a `disabled_at` timestamp; a `disabled` flag | `users.disabled` (0/1): one obvious `UPDATE` to block or restore, and nothing is lost. Enforced in the session lookup (signed out on the next request) and in the Google callback. |
+| Another rate limiter, or the GitHub token? | Add one; keep what exists | Keep what exists. The GitHub token protects the GitHub quota; the app's hourly per-user and global caps plus the daily and per-scan AI caps protect everything else, and sign-in plus the disable flag stop abusers. |
+| Where to run the 10-day cleanup | On page load; a public delete endpoint; the cron | The existing 5-minute cron: generic, independent of any user being online, and not callable from outside. Batches of 25 keep it inside D1's per-invocation limits. |
+| Cascade or explicit deletes | Rely on `ON DELETE CASCADE`; delete each table | Explicit deletes in one batch: correct whether or not foreign keys are enforced, and per-scan AI counters (which have no foreign key) go too. Empty repositories are removed in the same batch. |
+| Bug found while building this: the counter purge deleted per-scan AI counters | Leave; fix | Fixed. The purge removed rows whose window started over 2 days ago, and the per-scan cap's 365-day window almost always qualified, so the per-scan AI limit reset every 5 minutes. Per-scan counters are now kept until their scan is deleted. Test added. |
+| Showing expiry | Compute in the browser from a hard-coded 10; send it from the API | `expiresAt` on every scan response and `retentionDays` on the dashboard, so the UI follows the server setting. |

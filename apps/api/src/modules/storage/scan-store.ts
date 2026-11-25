@@ -204,7 +204,10 @@ interface ScanSummaryRow {
   high_risk_count: number;
 }
 
-function toScanSummary(row: ScanSummaryRow): ScanSummary {
+/** A scan summary as stored; routes add `expiresAt`, which depends on the retention setting. */
+export type StoredScanSummary = Omit<ScanSummary, 'expiresAt'>;
+
+function toScanSummary(row: ScanSummaryRow): StoredScanSummary {
   return {
     id: row.id,
     repository: { id: row.repository_id, owner: row.owner, name: row.name },
@@ -1054,7 +1057,7 @@ export function createScanStore(db: D1Database, now: () => string = () => new Da
     },
 
     /** Repositories, most recently updated first, each with its newest scan. */
-    async listRepositories(userId: string, page: number, pageSize: number): Promise<{ items: RepositoryListItem[]; total: number }> {
+    async listRepositories(userId: string, page: number, pageSize: number): Promise<{ items: Array<Omit<RepositoryListItem, 'lastScan'> & { lastScan: StoredScanSummary | null }>; total: number }> {
       const [rows, count] = await db.batch([
         db
           .prepare(
@@ -1074,7 +1077,7 @@ export function createScanStore(db: D1Database, now: () => string = () => new Da
       ]);
       const repositories = (rows?.results ?? []) as Array<RepositoryRow & { scan_count: number; last_scan_id: string | null }>;
       const lastScanIds = repositories.map((r) => r.last_scan_id).filter((id): id is string => id !== null);
-      const summaries = new Map<string, ScanSummary>();
+      const summaries = new Map<string, StoredScanSummary>();
       if (lastScanIds.length > 0) {
         const { results } = await db
           .prepare(`${SCAN_SUMMARY_SELECT} WHERE s.id IN (${lastScanIds.map(() => '?').join(', ')})`)
@@ -1109,7 +1112,7 @@ export function createScanStore(db: D1Database, now: () => string = () => new Da
       userId: string,
       page: number,
       pageSize: number,
-    ): Promise<{ items: ScanSummary[]; total: number }> {
+    ): Promise<{ items: StoredScanSummary[]; total: number }> {
       const [rows, count] = await db.batch([
         db
           .prepare(`${SCAN_SUMMARY_SELECT} WHERE s.repository_id = ? AND s.user_id = ? ORDER BY s.created_at DESC LIMIT ? OFFSET ?`)
@@ -1195,7 +1198,11 @@ export function createScanStore(db: D1Database, now: () => string = () => new Da
     },
 
     async purgeOldQuotaWindows(nowMs: number): Promise<void> {
-      await db.prepare('DELETE FROM rate_counters WHERE window_start < ?').bind(Math.floor(nowMs / 1000) - 2 * 86_400).run();
+      // Per-scan AI counters use a long window and must survive until their scan is deleted.
+      await db
+        .prepare(`DELETE FROM rate_counters WHERE window_start < ? AND key NOT LIKE 'ai-analyses:scan:%'`)
+        .bind(Math.floor(nowMs / 1000) - 2 * 86_400)
+        .run();
     },
 
     /** Creates or refreshes the user for a Google account. The very first user claims scans made before sign-in. */
@@ -1205,10 +1212,10 @@ export function createScanStore(db: D1Database, now: () => string = () => new Da
         .prepare(
           `INSERT INTO users (id, google_sub, email, name, created_at, last_login_at) VALUES (?1, ?2, ?3, ?4, ?5, ?5)
            ON CONFLICT (google_sub) DO UPDATE SET email = excluded.email, name = excluded.name, last_login_at = excluded.last_login_at
-           RETURNING id, email, name`,
+           RETURNING id, email, name, disabled`,
         )
         .bind(crypto.randomUUID(), input.sub, input.email, input.name, timestamp)
-        .first<{ id: string; email: string; name: string | null }>();
+        .first<{ id: string; email: string; name: string | null; disabled: number }>();
       if (!user) throw new Error('User upsert returned no row');
       await db
         .prepare(
@@ -1217,7 +1224,7 @@ export function createScanStore(db: D1Database, now: () => string = () => new Da
         )
         .bind(user.id)
         .run();
-      return user;
+      return { id: user.id, email: user.email, name: user.name, disabled: user.disabled === 1 };
     },
 
     async createSession(tokenHash: string, userId: string, expiresAt: string): Promise<void> {
@@ -1229,7 +1236,7 @@ export function createScanStore(db: D1Database, now: () => string = () => new Da
       return db
         .prepare(
           `SELECT u.id, u.email, u.name FROM sessions s JOIN users u ON u.id = s.user_id
-           WHERE s.id = ? AND s.expires_at > ?`,
+           WHERE s.id = ? AND s.expires_at > ? AND u.disabled = 0`,
         )
         .bind(tokenHash, now())
         .first<{ id: string; email: string; name: string | null }>();
@@ -1241,6 +1248,31 @@ export function createScanStore(db: D1Database, now: () => string = () => new Da
 
     async purgeExpiredSessions(): Promise<void> {
       await db.prepare('DELETE FROM sessions WHERE expires_at <= ?').bind(now()).run();
+    },
+
+    /**
+     * Hard-deletes up to `limit` scans created before `cutoff`, with everything that hangs off them
+     * (dependencies, AI analyses, release evidence, per-scan AI counters), then repositories left with no scans.
+     * Runs for all users. Explicit deletes, so it does not rely on foreign-key cascades being enabled.
+     */
+    async purgeExpiredScans(cutoff: string, limit: number): Promise<number> {
+      const { results } = await db
+        .prepare('SELECT id FROM scans WHERE created_at < ? ORDER BY created_at LIMIT ?')
+        .bind(cutoff, limit)
+        .all<{ id: string }>();
+      const ids = results.map((row) => row.id);
+      if (ids.length === 0) return 0;
+      const list = ids.map(() => '?').join(', ');
+      const ofDeps = `SELECT id FROM dependencies WHERE scan_id IN (${list})`;
+      await db.batch([
+        db.prepare(`DELETE FROM release_sources WHERE dependency_id IN (${ofDeps})`).bind(...ids),
+        db.prepare(`DELETE FROM upgrade_analyses WHERE dependency_id IN (${ofDeps})`).bind(...ids),
+        db.prepare(`DELETE FROM dependencies WHERE scan_id IN (${list})`).bind(...ids),
+        db.prepare(`DELETE FROM rate_counters WHERE key IN (${list})`).bind(...ids.map((id) => `ai-analyses:scan:${id}`)),
+        db.prepare(`DELETE FROM scans WHERE id IN (${list})`).bind(...ids),
+        db.prepare('DELETE FROM repositories WHERE NOT EXISTS (SELECT 1 FROM scans WHERE scans.repository_id = repositories.id)'),
+      ]);
+      return ids.length;
     },
   };
 }

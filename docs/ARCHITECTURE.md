@@ -182,6 +182,8 @@ Upgrades are merged across manifests by package and versions, then grouped: **sa
 - **Sessions**: a random 256-bit token in a `__Host-upgradepilot_session` cookie (`HttpOnly`, `Secure`, `SameSite=Lax`, 30 days). D1 stores only its SHA-256, so a leaked database cannot be replayed. Sign-out deletes the row; the cron purges expired ones.
 - **Protection**: every `/api` route except `/api/health` and `/api/auth/*` requires a session (401 otherwise). State-changing requests from another origin are refused (403), on top of `SameSite` cookies and JSON-only bodies. The static pages are public files but hold no data.
 - **Ownership**: scans have a `user_id`; lists, the dashboard and history are filtered by it, and another user's scan or repository answers 404, so its existence is not revealed. Hourly limits count per user. Scans from before sign-in existed are claimed by the first user who signs in.
+- **Disabled accounts**: `users.disabled = 1` (set directly in D1) makes session lookups fail, so the user is signed out on their next request, and the Google callback refuses to create a session (`auth_error=account_disabled`).
+- **Retention**: the 5-minute cron hard-deletes scans older than `DATA_RETENTION_DAYS` (default 10) for every user, 25 per run, with their dependencies, AI analyses, release evidence and per-scan AI counters (explicit deletes, not reliant on foreign-key cascades), then repositories with no scans left. Every scan response carries `expiresAt`, which the UI shows as "Expires in N days".
 - **Configuration**: `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` and `AUTH_SECRET` are Cloudflare secrets (`.dev.vars` locally). `APP_ORIGIN` is set only for `next dev` on port 3000.
 
 ## Known risks

@@ -9,6 +9,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Progress } from '@/components/ui/progress';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { ScanStatusBadge } from '@/components/badges';
+import { ExpiryBadge } from '@/components/expiry-badge';
 import { EmptyState, ErrorState, LoadingRows } from '@/components/states';
 import { formatRelative, shortSha } from '@/lib/format';
 import { isActiveStatus, useDashboard } from '@/lib/queries';
@@ -47,6 +48,7 @@ export function RecentScansCard() {
                   <TableHead className="text-right">Outdated</TableHead>
                   <TableHead className="text-right">High risk</TableHead>
                   <TableHead>Started</TableHead>
+                  <TableHead>Expires</TableHead>
                   <TableHead>
                     <span className="sr-only">Actions</span>
                   </TableHead>
@@ -87,6 +89,9 @@ export function RecentScansCard() {
                     <TableCell className={cn('text-right tabular-nums', scan.totals.outdated > 0 && 'font-medium text-amber-700')}>{scan.totals.outdated}</TableCell>
                     <TableCell className={cn('text-right tabular-nums', scan.totals.highRisk > 0 && 'font-medium text-red-700')}>{scan.totals.highRisk}</TableCell>
                     <TableCell className="whitespace-nowrap text-muted-foreground">{formatRelative(scan.createdAt)}</TableCell>
+                    <TableCell>
+                      <ExpiryBadge expiresAt={scan.expiresAt} compact />
+                    </TableCell>
                     <TableCell>
                       <Link
                         href={`/scan/?id=${encodeURIComponent(scan.id)}`}

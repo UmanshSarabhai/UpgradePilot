@@ -7,6 +7,7 @@ import { useRouter } from 'next/navigation';
 import { useState } from 'react';
 import { GitHubIcon } from '@/components/brand';
 import { ScanStatusBadge } from '@/components/badges';
+import { ExpiryBadge } from '@/components/expiry-badge';
 import { EmptyState, ErrorState, LoadingRows } from '@/components/states';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
@@ -105,6 +106,7 @@ export function RepositoryDetail({ id }: { id: string | null }) {
                   <TableHead className="text-right">Dependencies</TableHead>
                   <TableHead className="text-right">Outdated</TableHead>
                   <TableHead className="text-right">High risk</TableHead>
+                  <TableHead>Expires</TableHead>
                   <TableHead>
                     <span className="sr-only">Actions</span>
                   </TableHead>
@@ -139,6 +141,9 @@ export function RepositoryDetail({ id }: { id: string | null }) {
                     <TableCell className="text-right tabular-nums">{scan.totals.dependencies}</TableCell>
                     <TableCell className={cn('text-right tabular-nums', scan.totals.outdated > 0 && 'font-medium text-amber-700')}>{scan.totals.outdated}</TableCell>
                     <TableCell className={cn('text-right tabular-nums', scan.totals.highRisk > 0 && 'font-medium text-red-700')}>{scan.totals.highRisk}</TableCell>
+                    <TableCell>
+                      <ExpiryBadge expiresAt={scan.expiresAt} compact />
+                    </TableCell>
                     <TableCell>
                       <Link href={`/scan/?id=${encodeURIComponent(scan.id)}`} className="inline-flex items-center gap-0.5 rounded-sm text-primary underline-offset-4 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring">
                         View <ChevronRight className="size-4" aria-hidden />

@@ -16,6 +16,8 @@ export type Bindings = Env & {
   AUTH_SECRET?: string;
   /** Public origin when it differs from the Worker's own (local `next dev` on port 3000). */
   APP_ORIGIN?: string;
+  /** Days scans are kept before automatic deletion. Default 10. */
+  DATA_RETENTION_DAYS?: string;
 };
 
 export interface AppEnv {

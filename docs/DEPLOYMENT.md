@@ -108,6 +108,26 @@ To watch logs while a scan runs:
 npx wrangler tail --cwd apps/api
 ```
 
+## Managing users
+
+List accounts:
+
+```bash
+npx wrangler d1 execute upgradepilot --remote --command "SELECT email, name, disabled, created_at, last_login_at FROM users ORDER BY created_at" --cwd apps/api
+```
+
+Disable an account (their sessions stop working on the next request and sign-in is refused):
+
+```bash
+npx wrangler d1 execute upgradepilot --remote --command "UPDATE users SET disabled = 1 WHERE email = 'someone@example.com'" --cwd apps/api
+```
+
+Re-enable it with `disabled = 0`. Disabling keeps the account's scans until retention deletes them.
+
+## Data retention
+
+Every scan and everything under it (dependencies, AI analyses, release evidence) is hard-deleted `DATA_RETENTION_DAYS` days after it was created (default 10), for all users. The cron that runs every 5 minutes does it in batches of 25, and also removes repositories left with no scans. The app shows "Expires in N days" on each scan.
+
 ## Settings
 
 All are `vars` in `apps/api/wrangler.jsonc`. Change them and run `npm run deploy` again.
@@ -121,6 +141,7 @@ All are `vars` in `apps/api/wrangler.jsonc`. Change them and run `npm run deploy
 | `RATE_LIMIT_SCANS_PER_HOUR` | 20 | New scans per hour, for everyone combined |
 | `RATE_LIMIT_INSPECT_PER_HOUR` | 60 | Repository checks per hour |
 | `RATE_LIMIT_REANALYZE_PER_HOUR` | 20 | Re-analysis requests per hour |
+| `DATA_RETENTION_DAYS` | 10 | Days before a scan and its results are deleted automatically |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 
 The hourly limits apply to everyone combined, and each client (identified by a hash of its IP) gets a quarter of each. The AI per-scan limit also covers re-analysis. They exist so a public demo cannot use up the free GitHub, npm, D1 or AI allowances. Raise them for private use.

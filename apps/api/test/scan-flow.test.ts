@@ -17,6 +17,7 @@ import { createApp } from '../src/app';
 import type { ScanMessage } from '../src/env';
 import { sha256Hex } from '../src/lib/hash';
 import { createLogger } from '../src/lib/logger';
+import { retentionCutoff } from '../src/lib/retention';
 import { createScanStore } from '../src/modules/storage/scan-store';
 import { buildServices } from '../src/services';
 
@@ -519,6 +520,76 @@ describe('scan pipeline', () => {
       body: JSON.stringify({ url: 'https://github.com/acme/shop', branch: 'main' }),
     });
     expect(plain.status).toBe(415);
+  });
+
+  it('blocks a disabled account: its session stops working and sign-in is refused', async () => {
+    await env.DB.prepare(`UPDATE users SET disabled = 1 WHERE google_sub = 'google-owner'`).run();
+    expect((await request('/api/dashboard')).status).toBe(401);
+
+    const login = await request('/api/auth/google/login', {}, env, '');
+    const google = new URL(login.headers.get('location') ?? '');
+    const flowCookie = (login.headers.get('set-cookie') ?? '').split(';')[0] ?? '';
+    idTokenClaims = {
+      iss: 'accounts.google.com',
+      aud: 'test-client',
+      sub: 'google-owner',
+      email: 'owner@example.com',
+      email_verified: true,
+      exp: Math.floor(Date.now() / 1000) + 600,
+      nonce: google.searchParams.get('nonce'),
+    };
+    const callback = await request(
+      `/api/auth/google/callback?code=c0de&state=${google.searchParams.get('state')}`,
+      { headers: { cookie: flowCookie } },
+      env,
+      '',
+    );
+    expect(callback.headers.get('location')).toBe('/?auth_error=account_disabled');
+    const newSession = callback.headers
+      .getSetCookie()
+      .some((c) => c.startsWith('__Host-upgradepilot_session=') && !c.includes('Max-Age=0'));
+    expect(newSession).toBe(false);
+  });
+
+  it('hard-deletes scans past retention with everything under them, for every user', async () => {
+    const old = CreateScanResponseSchema.parse(
+      await (await createScan({ url: 'https://github.com/acme/shop', branch: 'main' })).json(),
+    ).scanId;
+    expect(await drive(old)).toEqual({ kind: 'finished', status: 'COMPLETED' });
+    const recent = CreateScanResponseSchema.parse(
+      await (await createScan({ url: 'https://github.com/acme/shop', branch: 'dev' })).json(),
+    ).scanId;
+
+    const recentScan = ScanSchema.parse(await (await request(`/api/scans/${recent}`)).json());
+    expect(new Date(recentScan.expiresAt).getTime() - new Date(recentScan.createdAt).getTime()).toBe(10 * 86_400_000);
+
+    const elevenDaysAgo = new Date(Date.now() - 11 * 86_400_000).toISOString();
+    await env.DB.prepare('UPDATE scans SET created_at = ? WHERE id = ?').bind(elevenDaysAgo, old).run();
+    const store = createScanStore(env.DB);
+    expect(await store.purgeExpiredScans(retentionCutoff(10), 25)).toBe(1);
+
+    const count = async (sql: string, ...args: unknown[]) =>
+      (await env.DB.prepare(sql).bind(...args).first<{ n: number }>())?.n ?? -1;
+    expect(await count('SELECT COUNT(*) AS n FROM scans WHERE id = ?', old)).toBe(0);
+    expect(await count('SELECT COUNT(*) AS n FROM dependencies WHERE scan_id = ?', old)).toBe(0);
+    expect(await count('SELECT COUNT(*) AS n FROM release_sources')).toBe(0);
+    expect(await count('SELECT COUNT(*) AS n FROM upgrade_analyses')).toBe(0);
+    expect(await count('SELECT COUNT(*) AS n FROM scans WHERE id = ?', recent)).toBe(1);
+    expect(await count('SELECT COUNT(*) AS n FROM repositories')).toBe(1);
+
+    await env.DB.prepare('UPDATE scans SET created_at = ? WHERE id = ?').bind(elevenDaysAgo, recent).run();
+    expect(await store.purgeExpiredScans(retentionCutoff(10), 25)).toBe(1);
+    expect(await count('SELECT COUNT(*) AS n FROM repositories')).toBe(0);
+  });
+
+  it('keeps per-scan AI counters when purging old rate-limit windows', async () => {
+    await env.DB.batch([
+      env.DB.prepare(`INSERT INTO rate_counters (key, window_start, count) VALUES ('ai-analyses:scan:abc', 0, 3)`),
+      env.DB.prepare(`INSERT INTO rate_counters (key, window_start, count) VALUES ('scans', 0, 3)`),
+    ]);
+    await createScanStore(env.DB).purgeOldQuotaWindows(Date.now());
+    const { results } = await env.DB.prepare('SELECT key AS counter FROM rate_counters ORDER BY key').all<{ counter: string }>();
+    expect(results.map((row) => row.counter)).toEqual(['ai-analyses:scan:abc']);
   });
 
   it('recovers an interrupted step and drops stale messages', async () => {

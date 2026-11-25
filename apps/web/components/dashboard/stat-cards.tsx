@@ -34,7 +34,10 @@ export function StatCards() {
           </Card>
         ))}
       </div>
-      <p className="text-xs text-muted-foreground">Counts use the latest completed scan of each repository.</p>
+      <p className="text-xs text-muted-foreground">
+        Counts use the latest completed scan of each repository.
+        {data && ` Scans and their results are deleted automatically after ${data.retentionDays} days.`}
+      </p>
     </section>
   );
 }

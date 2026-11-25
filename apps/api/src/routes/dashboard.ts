@@ -1,6 +1,7 @@
 import { type DashboardResponse, DashboardResponseSchema } from '@upgradepilot/shared';
 import { Hono } from 'hono';
 import type { AppEnv } from '../env';
+import { expiresAt, retentionDays } from '../lib/retention';
 import { jsonResponse } from '../lib/validation';
 import { buildServices } from '../services';
 
@@ -15,7 +16,14 @@ export const dashboardRoutes = new Hono<AppEnv>().get('/dashboard', async (c) =>
   let entry = cache.get(userId);
   if (!entry || entry.expires <= Date.now()) {
     const { store } = buildServices(c.env, c.get('logger'), c.get('fetchImpl'));
-    entry = { value: await store.dashboard(userId, RECENT_SCANS), expires: Date.now() + CACHE_MS };
+    const days = retentionDays(c.env);
+    const data = await store.dashboard(userId, RECENT_SCANS);
+    const value = {
+      ...data,
+      recentScans: data.recentScans.map((scan) => ({ ...scan, expiresAt: expiresAt(scan.createdAt, days) })),
+      retentionDays: days,
+    };
+    entry = { value, expires: Date.now() + CACHE_MS };
     if (cache.size >= MAX_CACHED_USERS) cache.clear();
     cache.set(userId, entry);
   }

@@ -67,6 +67,8 @@ export const ScanSchema = z.object({
   createdAt: z.string(),
   startedAt: z.string().nullable(),
   completedAt: z.string().nullable(),
+  /** When the scan and its results are deleted automatically (createdAt + DATA_RETENTION_DAYS). */
+  expiresAt: z.string(),
 });
 export type Scan = z.infer<typeof ScanSchema>;
 

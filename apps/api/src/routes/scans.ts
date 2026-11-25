@@ -13,6 +13,7 @@ import {
 import { Hono } from 'hono';
 import { z } from 'zod';
 import type { AppEnv, ScanMessage } from '../env';
+import { expiresAt, retentionDays } from '../lib/retention';
 import { AppError } from '../lib/errors';
 import { enforceHourlyLimit } from '../lib/limits';
 import { jsonResponse, parseJsonBody, parseQuery } from '../lib/validation';
@@ -44,7 +45,7 @@ function parseDiscovery(json: string | null): DiscoverySummary | null {
   }
 }
 
-function toScan(scan: ScanRecord) {
+function toScan(scan: ScanRecord, retentionDays: number) {
   return {
     id: scan.id,
     repository: { id: scan.repositoryId, owner: scan.owner, name: scan.name, url: scan.githubUrl },
@@ -58,6 +59,7 @@ function toScan(scan: ScanRecord) {
     createdAt: scan.createdAt,
     startedAt: scan.startedAt,
     completedAt: scan.completedAt,
+    expiresAt: expiresAt(scan.createdAt, retentionDays),
   };
 }
 
@@ -104,7 +106,7 @@ export const scanRoutes = new Hono<AppEnv>()
   .get('/scans/:scanId', async (c) => {
     const { store } = buildServices(c.env, c.get('logger'), c.get('fetchImpl'));
     const scan = await ownedScan(store, c.req.param('scanId'), c.get('user').id);
-    return jsonResponse(c, ScanSchema, toScan(scan));
+    return jsonResponse(c, ScanSchema, toScan(scan, retentionDays(c.env)));
   })
 
   .get('/scans/:scanId/dependencies', async (c) => {

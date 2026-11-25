@@ -10,6 +10,7 @@ import { formatDate, shortSha } from '@/lib/format';
 import { isActiveStatus } from '@/lib/queries';
 import { isHttpUrl } from '@/components/safe-link';
 import { GitHubIcon } from '@/components/brand';
+import { ExpiryBadge } from '@/components/expiry-badge';
 
 export function ScanHeader({ scan }: { scan: Scan }) {
   const active = isActiveStatus(scan.status);
@@ -34,6 +35,7 @@ export function ScanHeader({ scan }: { scan: Scan }) {
           )}
         </h1>
         <ScanStatusBadge status={scan.status} />
+        <ExpiryBadge expiresAt={scan.expiresAt} />
       </div>
 
       <dl className="flex flex-wrap gap-x-6 gap-y-1.5 text-sm text-muted-foreground">

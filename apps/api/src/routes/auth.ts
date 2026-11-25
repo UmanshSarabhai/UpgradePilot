@@ -109,6 +109,10 @@ export const authRoutes = new Hono<AppEnv>()
 
     const store = createScanStore(c.env.DB);
     const user = await store.upsertGoogleUser(identity);
+    if (user.disabled) {
+      c.get('logger').warn('sign-in refused: account disabled', { userId: user.id });
+      return fail('account_disabled');
+    }
     const token = randomToken();
     await store.createSession(
       await sha256Hex(token),

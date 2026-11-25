@@ -9,6 +9,7 @@ import { Hono } from 'hono';
 import type { AppEnv } from '../env';
 import { AppError } from '../lib/errors';
 import { enforceHourlyLimit } from '../lib/limits';
+import { expiresAt, retentionDays } from '../lib/retention';
 import { parseGitHubRepoUrl } from '../modules/repository/github-url';
 import { jsonResponse, parseJsonBody, parseQuery } from '../lib/validation';
 import { buildServices } from '../services';
@@ -25,7 +26,12 @@ export const repositoryRoutes = new Hono<AppEnv>().post('/repositories/inspect',
     const { page, pageSize } = parseQuery(c, PaginationQuerySchema);
     const { store } = buildServices(c.env, c.get('logger'), c.get('fetchImpl'));
     const { items, total } = await store.listRepositories(c.get('user').id, page, pageSize);
-    return jsonResponse(c, RepositoryListResponseSchema, { items, total, page, pageSize });
+    const days = retentionDays(c.env);
+    const withExpiry = items.map((item) => ({
+      ...item,
+      lastScan: item.lastScan ? { ...item.lastScan, expiresAt: expiresAt(item.lastScan.createdAt, days) } : null,
+    }));
+    return jsonResponse(c, RepositoryListResponseSchema, { items: withExpiry, total, page, pageSize });
   })
 
   .get('/repositories/:repositoryId/scans', async (c) => {
@@ -34,5 +40,12 @@ export const repositoryRoutes = new Hono<AppEnv>().post('/repositories/inspect',
     const repository = await store.getRepository(c.req.param('repositoryId'), c.get('user').id);
     if (!repository) throw new AppError('NOT_FOUND', 'Repository not found.', 404);
     const { items, total } = await store.listScans(repository.id, c.get('user').id, page, pageSize);
-    return jsonResponse(c, ScanHistoryResponseSchema, { repository, items, total, page, pageSize });
+    const days = retentionDays(c.env);
+    return jsonResponse(c, ScanHistoryResponseSchema, {
+      repository,
+      items: items.map((scan) => ({ ...scan, expiresAt: expiresAt(scan.createdAt, days) })),
+      total,
+      page,
+      pageSize,
+    });
   });

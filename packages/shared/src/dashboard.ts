@@ -20,6 +20,8 @@ export const ScanSummarySchema = z.object({
   errorMessage: z.string().nullable(),
   createdAt: z.string(),
   completedAt: z.string().nullable(),
+  /** When the scan and its results are deleted automatically. */
+  expiresAt: z.string(),
   totals: z.object({
     dependencies: z.number().int(),
     outdated: z.number().int(),
@@ -70,6 +72,8 @@ export const DashboardResponseSchema = z.object({
     highRisk: z.number().int(),
   }),
   recentScans: z.array(ScanSummarySchema),
+  /** How long scans are kept before automatic deletion. */
+  retentionDays: z.number().int(),
 });
 export type DashboardResponse = z.infer<typeof DashboardResponseSchema>;
 

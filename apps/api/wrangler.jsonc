@@ -17,7 +17,9 @@
     // Hourly caps on the endpoints that spend GitHub, npm and D1 quota (global, not per visitor).
     "RATE_LIMIT_INSPECT_PER_HOUR": "60",
     "RATE_LIMIT_SCANS_PER_HOUR": "20",
-    "RATE_LIMIT_REANALYZE_PER_HOUR": "20"
+    "RATE_LIMIT_REANALYZE_PER_HOUR": "20",
+    // Scans and all their results are hard-deleted this many days after creation (cron, every 5 minutes).
+    "DATA_RETENTION_DAYS": "10"
   },
   "ai": {
     "binding": "AI"

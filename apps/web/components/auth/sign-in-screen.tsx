@@ -13,6 +13,7 @@ const AUTH_ERROR_MESSAGES: Record<string, string> = {
   invalid_state: 'The sign-in link expired. Try again.',
   exchange_failed: 'Google sign-in failed. Try again.',
   unverified_email: "Your Google account's email address is not verified.",
+  account_disabled: 'This account has been disabled. Contact the owner of this UpgradePilot instance.',
   not_configured: 'Google sign-in is not set up on this server yet.',
 };
 

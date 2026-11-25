@@ -12,7 +12,15 @@ export const MeResponseSchema = z.object({ user: UserSchema });
 export type MeResponse = z.infer<typeof MeResponseSchema>;
 
 /** Error codes the login callback redirects with: /?auth_error=<code>. */
-export const AuthErrorCodeSchema = z.enum(['access_denied', 'invalid_state', 'exchange_failed', 'unverified_email', 'not_configured']);
+export const AuthErrorCodeSchema = z.enum([
+  'access_denied',
+  'invalid_state',
+  'exchange_failed',
+  'unverified_email',
+  'not_configured',
+  /** The account was disabled by the owner (users.disabled = 1). */
+  'account_disabled',
+]);
 export type AuthErrorCode = z.infer<typeof AuthErrorCodeSchema>;
 
 /** Where the browser goes to start signing in. Optional `returnTo` is a same-site path. */

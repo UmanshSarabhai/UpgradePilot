@@ -1,6 +1,7 @@
 import { createApp } from './app';
 import { type ScanMessage, ScanMessageSchema } from './env';
 import { createLogger } from './lib/logger';
+import { retentionCutoff, retentionDays } from './lib/retention';
 import { buildServices } from './services';
 
 const app = createApp();
@@ -8,6 +9,8 @@ const app = createApp();
 /** Scans with no progress for this long are considered stuck and re-enqueued by the cron sweep. */
 const STALE_AFTER_MS = 3 * 60_000;
 const SWEEP_LIMIT = 20;
+/** Scans deleted per cron run (every 5 minutes): up to 7,200 a day, well inside D1's per-invocation limits. */
+const RETENTION_BATCH = 25;
 
 export default {
   fetch: app.fetch,
@@ -53,6 +56,9 @@ export default {
     await store.purgeExpiredCache(Date.now());
     await store.purgeOldQuotaWindows(Date.now());
     await store.purgeExpiredSessions();
+    // Data retention for every user: scans older than DATA_RETENTION_DAYS are hard-deleted in batches.
+    const purged = await store.purgeExpiredScans(retentionCutoff(retentionDays(env)), RETENTION_BATCH);
+    if (purged > 0) logger.info('deleted expired scans', { count: purged });
     if (stale.length > 0) logger.info('re-enqueued stale scans', { count: stale.length });
   },
 } satisfies ExportedHandler<Env, unknown>;
